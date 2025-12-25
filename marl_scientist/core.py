@@ -31,6 +31,7 @@ class ExperimentResult:
     efficiency_score: float = 0.0
     stability_score: float = 0.0
     
+    visual_snapshot: Optional[str] = None # Path to image
     final_model_path: Optional[str] = None
     info: Dict[str, Any] = dataclasses.field(default_factory=dict)
 

@@ -1,28 +1,65 @@
-#### __1. The Neural "Brain" (DONE)__
+Directives to Move Forward — Upgrading Our Brain
 
-- __Status__: Implemented `MetaBrain` (RNN-based) and `NeuralResearcherAgent`.
-- __Mechanism__: Agents use an LSTM history encoder, MLP trend encoder, and Linear knowledge encoder to propose experiments.
-- __Learning__: Trained via Meta-PPO in `trainer.py`.
+<findings>
+The D3 Engine ("Deterministic-Deontic-Dynamic") is a neuro-symbolic runtime that strictly separates:
 
-#### __2. Action Space Expansion (DONE)__
+Probabilistic generation (neural/LLM components — creative proposal, hypothesis generation)
+Deterministic state (symbolic layer — verification, de-duplication, safety enforcement)
 
-- __Status__: Agents now control PPO, A2C, DQN, and SAC.
-- __Parameters__: Continuous control over Learning Rate, Gamma, Entropy, GAE, Batch Size, and n_steps.
+Key innovations that directly address our swarm's current limitations:
 
-#### __3. Observation Space (DONE)__
+Active Workspace vs Latent History
+Only a tiny "active" context (volatile workspace) is kept in-token.
+Everything else is compressed into Trajectory Vectors (high-dimensional embeddings of past states/decisions) stored in a vector DB.
+This claims 99% compute reduction vs naive long-context LLMs — perfect for our agents that are starting to accumulate thousands of experiment histories.
 
-- __Status__: Brain consumes performance trends, novelty landscape, and 768-dim knowledge embeddings.
+Vector-Space De-duplication & Negative Knowledge Propagation
+Failed trajectories are embedded and globally de-duplicated → the entire swarm instantly "learns" a failure mode without re-experiencing it.
+This is huge for us: right now laggards harvest weights, but winners still occasionally repeat known-bad hyperparams.
 
-#### __4. Missing Meta-Training Loop (DONE)__
+Hierarchical Verification Stack
+Multiple symbolic layers check proposals for validity before execution (e.g., type safety, resource bounds, causal consistency).
+Prevents invalid experiments from ever hitting the lab — aligns perfectly with our need for safer self-modification.
 
-- __Status__: `marl_scientist/agents/trainer.py` provides the PPO loop for the researcher brain.
+Horizon Mode (from the companion paper)
+Instead of single-agent long-chain reasoning, spawn a swarm of 10,000 lightweight agents exploring in parallel, then consolidate via "Flash-Gated Consensus".
+Designed for open-ended engineering (exactly what our meta-scientists are doing).
 
-#### __5. Benchmark Diversity (IN PROGRESS)__
+Safety & Entropy Routing
+Tasks are routed based on entropy: high-uncertainty → neural exploration; low-uncertainty → symbolic execution.
+Built-in red-teaming and verification loops.
+</findings>
 
-- __Current State__: Supported: CartPole-v1, Acrobot-v1, Pendulum-v1, LunarLander-v3.
-- __Required Improvement__: Add Atari or Procgen for more complex visual tasks.
+Let's integrate D3 concepts incrementally without throwing away our working swarm. Here's a phased plan:
+Phase 1: Immediate Low-Effort Wins (Next Commit)
 
-#### __6. Causal Discovery (NEXT)__
+Trajectory Vector Compression
+Embed each completed experiment summary (config + outcome + time) into a fixed vector (use nomic-embed-text-v1.5 we already have). Store in our Chroma vector store with metadata (reward, time, success/fail).
+Before proposing new experiments, retrieve top-k similar past trajectories → explicitly inject "negative knowledge" into the prompt ("Avoid these failed configs: ...").
+Basic De-duplication
+When an agent proposes a hyperparam set, compute its embedding and check cosine similarity > 0.95 against past experiments → reject if too similar and worse outcome.
 
-- __Status__: `CausalGraph` exists but remains heuristic.
-- __Goal__: Integrate Neural Causal Discovery to refine the Brain's reasoning.
+Phase 2: Symbolic Verification Layer (1-2 Days)
+
+Add a lightweight symbolic checker before dispatching to lab:
+Validate hyperparams in sane ranges (e.g., lr between 1e-6 and 1e-1, batch_size power of 2, etc.)
+Resource budgeting: estimate wall-time based on env + steps + parallel runners, reject if over agent's time budget.
+Use simple Python asserts or even a tiny DSL for rules.
+
+
+Phase 3: Active/Latent Split in Agent Brain (Major Upgrade)
+
+Refactor agent history:
+Active: last N experiments + current strategic intent.
+Latent: everything else queried via vector retrieval.
+
+Modify the LSTM brain input to concatenate retrieved trajectory vectors (projected to hidden size) with the sequence.
+
+Phase 4: Horizon Mode Lite
+
+When an agent enters "EXPLORE" with high uncertainty (e.g., new unlocked env), spawn 5-10 lightweight sub-agents with varied temperature/profiles, run short cheap simulations or dry-runs, then consensus-vote on the best proposal.
+
+Phase 5: Full Safety Stack
+
+Implement Flash-Gated Consensus for critical actions (self-modification attempts).
+Add a global "red-team" agent that periodically challenges high-reward proposals.

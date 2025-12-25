@@ -12,9 +12,10 @@ class LabEnvironment(MetaEnvironment):
     """
     The 'Lab' where Researcher Agents submit their experiment configurations.
     """
-    def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"], max_workers: int = 8):
+    def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"], max_workers: int = 8, visual: bool = False):
         self.log = setup_logger()
         self.benchmarks = authorized_benchmarks
+        self.visual = visual
         # Cache metadata for benchmarks
         self.env_metadata = {b: self._get_env_metadata(b) for b in self.benchmarks}
         
@@ -46,6 +47,30 @@ class LabEnvironment(MetaEnvironment):
         self.executor = ProcessPoolExecutor(max_workers=max_workers)
         self.futures_map = {} # future -> (agent_id, start_time)
         self.running_experiments = {} # agent_id -> config
+        
+        # [NEW] Global Benchmark Metadata for Dispatch Logic
+        self.env_metadata = {}
+        self._prepopulate_metadata()
+        
+    def _prepopulate_metadata(self):
+        """Pre-fetches essential metadata for all benchmarks to assist in dispatching."""
+        import gymnasium as gym
+        for tier_envs in self.tiers.values():
+            for env_id in tier_envs:
+                try:
+                    # Create a dummy env to extract space info
+                    temp_env = gym.make(env_id)
+                    self.env_metadata[env_id] = {
+                        "is_discrete": isinstance(temp_env.action_space, gym.spaces.Discrete),
+                        "is_continuous": isinstance(temp_env.action_space, (gym.spaces.Box, gym.spaces.Dict)),
+                    }
+                    temp_env.close()
+                except:
+                    # Fallback for common ones if make fails
+                    if "CartPole" in env_id or "Acrobot" in env_id or "LunarLander-v3" == env_id:
+                        self.env_metadata[env_id] = {"is_discrete": True, "is_continuous": False}
+                    else:
+                        self.env_metadata[env_id] = {"is_discrete": False, "is_continuous": True}
         
     def close(self):
         if self.executor:
@@ -89,7 +114,7 @@ class LabEnvironment(MetaEnvironment):
         if config is None: return
         
         self.log.info(f"[Lab] Scheduling {agent_id} on {config.env_id} ({config.algorithm})...")
-        fut = self.executor.submit(run_experiment_task, config, agent_id)
+        fut = self.executor.submit(run_experiment_task, config, agent_id, self.visual)
         
         import time
         self.futures_map[fut] = (agent_id, time.time())

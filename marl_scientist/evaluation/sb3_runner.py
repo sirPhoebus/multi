@@ -4,6 +4,7 @@ import torch.nn as nn
 from stable_baselines3 import PPO, A2C, DQN, SAC
 from stable_baselines3.common.evaluation import evaluate_policy
 import numpy as np
+import time
 
 from marl_scientist.core import ExperimentConfig, ExperimentResult
 
@@ -13,15 +14,27 @@ class SB3ExperimentRunner:
     def __init__(self, benchmark_env_id: str = "CartPole-v1"):
         self.env_id = benchmark_env_id
         
-    def run(self, config: ExperimentConfig) -> ExperimentResult:
+    def run(self, config: ExperimentConfig, visual: bool = False, agent_id: str = "Unknown") -> ExperimentResult:
         """
         Trains an agent according to config and returns the result.
         """
         try:
             # 1. Create Environment
             from stable_baselines3.common.monitor import Monitor
-            env = gym.make(self.env_id)
-            env = Monitor(env) # Fix: Must wrap for reward logging
+            try:
+                env = gym.make(self.env_id)
+                env = Monitor(env) 
+                
+                eval_render_mode = "rgb_array" if visual else None
+                eval_env = gym.make(self.env_id, render_mode=eval_render_mode)
+            except Exception as e:
+                return ExperimentResult(
+                    config=config,
+                    final_mean_reward=-500.0,
+                    training_curve=[],
+                    metrics={"env_init_error": 1.0},
+                    info={"error": str(e)}
+                )
             
             # 2. Instantiate Algorithm
             algo_class = self._get_algo_class(config.algorithm)
@@ -73,8 +86,13 @@ class SB3ExperimentRunner:
             algo_kwargs = {}
             
             # Universal Params (most algos support these)
-            for key in ["learning_rate", "gamma", "seed", "device", "verbose"]:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            for key in ["learning_rate", "gamma", "seed", "verbose"]:
                 if key in hp: algo_kwargs[key] = hp.pop(key)
+            
+            algo_kwargs["device"] = device
             
             # On-Policy Params (PPO, A2C)
             if config.algorithm in ["PPO", "A2C"]:
@@ -137,9 +155,7 @@ class SB3ExperimentRunner:
                     return True
                     return True
             
-            eval_env = gym.make(self.env_id)
-            curve_callback = CurveCallback(eval_env, eval_freq=1000)
-            
+            eval_env = gym.make(self.env_id, render_mode="rgb_array" if visual else None)
             curve_callback = CurveCallback(eval_env, eval_freq=1000)
             
             total_timesteps = hp.get("total_timesteps", 10000)
@@ -159,11 +175,27 @@ class SB3ExperimentRunner:
                 "stability": 1.0 / (float(std_reward) + 1e-6),
             }
             
+            # Optional Visual Snapshot
+            visual_path = None
+            if visual:
+                try:
+                    import os
+                    os.makedirs("saves/snapshots", exist_ok=True)
+                    frame = eval_env.render()
+                    if frame is not None:
+                        from PIL import Image
+                        img = Image.fromarray(frame)
+                        visual_path = f"saves/snapshots/{agent_id}_{config.env_id}_{int(time.time())}.png"
+                        img.save(visual_path)
+                except Exception as ve:
+                    print(f"Failed to capture snapshot: {ve}")
+
             return ExperimentResult(
                 config=config,
                 final_mean_reward=mean_reward,
                 training_curve=training_curve, 
-                metrics=metrics
+                metrics=metrics,
+                visual_snapshot=visual_path
             )
             
         except Exception as e:

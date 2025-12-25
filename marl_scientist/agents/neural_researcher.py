@@ -18,7 +18,8 @@ class NeuralResearcherAgent(Researcher):
         self.log = setup_logger()
         
         # Initialize Brain
-        self.brain = MetaBrain()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.brain = MetaBrain().to(self.device)
         if model_path:
             try:
                 self.brain.load_state_dict(torch.load(model_path))
@@ -109,12 +110,18 @@ class NeuralResearcherAgent(Researcher):
             if allowed_names:
                 target_env_context = allowed_names[-1] 
                 
+            # Prepare inputs on correct device
+            for k, v in inputs.items():
+                inputs[k] = v.to(self.device)
+            
+            if self.hidden_state is not None:
+                self.hidden_state = self.hidden_state.to(self.device)
+            
+            pref_tensor = torch.tensor(self.preference_vec, dtype=torch.float32, device=self.device).unsqueeze(0) # [1, 3]
+            
+            # Memory Context (Matches HP space)
             mem_vec = self.memory.retrieve_vector(target_env_context)
-            mem_tensor = torch.tensor(mem_vec, dtype=torch.float32).unsqueeze(0) # [1, 6]
-            
-            pref_tensor = torch.tensor(self.preference_vec, dtype=torch.float32).unsqueeze(0) # [1, 3]
-            
-            # [NEW] Strategic Persistence & Forced Inference
+            mem_tensor = torch.tensor(mem_vec, dtype=torch.float32, device=self.device).unsqueeze(0)
             intents = ["EXPLORE", "EXPLOIT", "REFINE"]
             is_persistent = self.last_goal is not None and self.goal_persistence_counter > 0
             forced_g_idx = self.last_goal if is_persistent else None
@@ -159,7 +166,10 @@ class NeuralResearcherAgent(Researcher):
             
             # 2. Compatibility Masking
             discrete_envs = ["CartPole-v1", "LunarLander-v3", "Acrobot-v1"]
-            continuous_envs = ["Pendulum-v1", "MountainCarContinuous-v0"]
+            continuous_envs = [
+                "Pendulum-v1", "MountainCarContinuous-v0", 
+                "Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"
+            ]
             
             algo_mask = torch.zeros_like(algo_logits)
             

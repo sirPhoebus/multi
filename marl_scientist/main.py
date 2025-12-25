@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--num-agents", type=int, default=1, help="Initial number of agents")
     parser.add_argument("--max-agents", type=int, default=8, help="Maximum scaling limit")
     parser.add_argument("--agent-type", type=str, default="heuristic", choices=["heuristic", "neural"], help="Type of researcher agent")
+    parser.add_argument("--visual", action="store_true", help="Enable visual reporting (captures environment snapshots)")
     args = parser.parse_args()
     
     log = setup_logger("simulation.log")
@@ -25,7 +26,7 @@ def main():
     
     # 1. Setup Environment
     benchmarks = ["CartPole-v1", "Acrobot-v1", "Pendulum-v1", "LunarLander-v3", "MountainCarContinuous-v0", "Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"]
-    lab = LabEnvironment(authorized_benchmarks=benchmarks, max_workers=args.max_agents)
+    lab = LabEnvironment(authorized_benchmarks=benchmarks, max_workers=args.max_agents, visual=args.visual)
     kb = RealKnowledgeStore()
     kb.ingest_folder("knowledge/") 
     
@@ -202,6 +203,15 @@ def main():
                         old_env = config.env_id
                         config.env_id = random.choice(unlocked_envs)
                         log.info(f"[Pioneer] Redirecting Elite {aid} from {old_env} to {config.env_id}!")
+                        
+                        # [FIX] Ensure Algorithm is compatible with NEW environment
+                        env_meta = lab.env_metadata.get(config.env_id, {})
+                        if env_meta.get("is_continuous") and config.algorithm == "DQN":
+                            config.algorithm = "SAC" # Best fallback for continuous
+                            log.info(f"  - Algorithm adjusted to {config.algorithm} for Continuous compatibility.")
+                        elif env_meta.get("is_discrete") and config.algorithm == "SAC":
+                            config.algorithm = "PPO" # Best fallback for discrete
+                            log.info(f"  - Algorithm adjusted to {config.algorithm} for Discrete compatibility.")
 
                     # [NEW] Tiered Step Budget
                     if config.env_id in ["CartPole-v1"]:
@@ -222,9 +232,14 @@ def main():
                     config.hyperparameters["total_timesteps"] = steps
                     
                     log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for {steps//1000}k steps")
-                    lab.submit_experiment(aid, config)
-                    agent_status[aid] = "BUSY"
-                    busy_count += 1
+                    from concurrent.futures.process import BrokenProcessPool
+                    try:
+                        lab.submit_experiment(aid, config)
+                        agent_status[aid] = "BUSY"
+                        busy_count += 1
+                    except BrokenProcessPool:
+                        log.error("[CRITICAL] Process Pool Broken. Simulation terminating.")
+                        raise KeyboardInterrupt # Trigger finally block
                 else:
                     # Put back to IDLE so we can re-evaluate priority next tick
                     agent_status[aid] = "IDLE"
@@ -232,7 +247,7 @@ def main():
             # ... (Periodic Vision Analysis logic stays same)
             
             # E. Periodic Vision Analysis (every 60s)
-            if time.time() - last_vision_time > 60:
+            if args.visual and (time.time() - last_vision_time > 60):
                 log.info("[Vision] requesting Snapshot...")
                 plot_path = plot_training_curves(history)
                 try:
