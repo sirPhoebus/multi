@@ -71,5 +71,14 @@ Drop `.txt` files into `knowledge/`. The **Async Watcher** will instantly ingest
 - [x] Async Knowledge Ingestion
 - [x] Swarm Dynamics (Leaderboard, Bonus Slots)
 - [x] Curriculum Learning (Tiers, Auto-Promotion)
+- [ ] Add memory mechanisms for long-term knowledge retention
+- [ ] Implement hierarchical decision-making
+- [ ] Include multi-task learning scenarios
+- [ ] Add self-supervised learning objectives
 - [ ] Multi-Agent Competitive Meta-Training (Self-Play)
 - [ ] Dynamic Neural Architecture Synthesis
+
+
+
+
+

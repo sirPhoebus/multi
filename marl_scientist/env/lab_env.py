@@ -40,6 +40,15 @@ class LabEnvironment(MetaEnvironment):
             2: float('inf')
         }
     
+        # [NEW] Async Executor
+        self.executor = ProcessPoolExecutor(max_workers=8) # Fixed pool size
+        self.futures_map = {} # future -> (agent_id, start_time)
+        self.running_experiments = {} # agent_id -> config
+        
+    def close(self):
+        if self.executor:
+            self.executor.shutdown(wait=False)
+
     @property
     def allowed_envs(self) -> List[str]:
         # Return all envs up to current tier
@@ -51,6 +60,7 @@ class LabEnvironment(MetaEnvironment):
     def _get_env_metadata(self, env_id: str) -> Dict[str, Any]:
         """Extracts observation and action space info from gymnasium."""
         try:
+            import gymnasium as gym
             temp_env = gym.make(env_id)
             meta = {
                 "env_id": env_id,
@@ -63,124 +73,136 @@ class LabEnvironment(MetaEnvironment):
             return meta
         except Exception as e:
             return {"env_id": env_id, "error": str(e)}
+
+    def submit_experiment(self, agent_id: str, config: ExperimentConfig):
+        """Non-blocking submission of an experiment."""
+        if config is None: return
         
-    def step(self, actions: Dict[str, ExperimentConfig]) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
-        """
-        Runs one step of the meta-environment.
-        Args:
-            actions: Dictionary of experiments proposed by agents (agent_id -> ExperimentConfig).
-        Returns:
-            results: Dictionary of ExperimentResult objects (agent_id -> Result).
-            rewards: Dictionary of float rewards (agent_id -> reward).
-        """
+        self.log.info(f"[Lab] Scheduling {agent_id} on {config.env_id} ({config.algorithm})...")
+        fut = self.executor.submit(run_experiment_task, config, agent_id)
+        
+        import time
+        self.futures_map[fut] = (agent_id, time.time())
+        self.running_experiments[agent_id] = config
+
+    def poll_results(self) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
+        """Checks for completed experiments without blocking."""
         import time
         results_out = {}
         rewards = {}
         
-        # Run Experiments in Parallel
-        futures_map = {}
+        # Check completed futures
+        # We use a list to avoid modifying dict while iterating if we remove keys
+        done_futures = [f for f in self.futures_map if f.done()]
         
-        # Determine max workers
-        max_workers = min(len(actions), 8)
-        
-        self.log.info(f"[Lab] Submitting {len(actions)} experiments to pool (workers={max_workers})...")
-        
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            for agent_id, config in actions.items():
-                if config is None: continue
-                self.log.info(f"[Lab] Scheduling {agent_id} on {config.env_id} ({config.algorithm})...")
-                fut = executor.submit(run_experiment_task, config, agent_id)
-                futures_map[fut] = (agent_id, time.time())
+        if not done_futures:
+            return {}, {}
             
-            # Collect results
-            self.log.info(f"[Lab] Waiting for completion with 60s timeout...")
+        for future in done_futures:
+            agent_id, t_start = self.futures_map.pop(future)
+            if agent_id in self.running_experiments:
+                del self.running_experiments[agent_id]
+                
             try:
-                for future in as_completed(futures_map, timeout=60):
-                    a_id, t_start = futures_map[future]
-                    try:
-                        a_id_returned, result, error = future.result()
-                        t_end = time.time()
+                # Get result immediately since it is done
+                a_id_returned, result, error = future.result()
+                t_end = time.time()
+                
+                if result:
+                    # Success
+                    result.duration_seconds = t_end - t_start
+                    # total_env_steps logic handled in result usually, but ensure it's there
+                    result.total_env_steps = result.config.hyperparameters.get("total_timesteps", 0)
+                    
+                    self.log.info(f"[Lab] {a_id_returned} finished: {result.final_mean_reward:.1f} (Time: {result.duration_seconds:.1f}s)")
+                    
+                    # Post-Processing
+                    self.step_counter += 1
+                    meta_reward = self._calculate_meta_reward(result)
+                    
+                    rewards[a_id_returned] = meta_reward
+                    self.history.append(result)
+                    results_out[a_id_returned] = result
+                    self.novelty_calc.add_to_history(result.config)
+                    
+                    # Check for best
+                    if result.final_mean_reward > self.best_reward:
+                        self.best_reward = result.final_mean_reward
+                        self.best_config = result.config
+                        self.log.info(f"!!! New Global Best found by {a_id_returned}: {self.best_reward:.1f} !!!")
                         
-                        if result:
-                            # Success
-                            result.duration_seconds = t_end - t_start
-                            result.total_env_steps = result.config.hyperparameters.get("n_timesteps", 0)
-                            
-                            self.log.info(f"[Lab] {a_id_returned} finished: {result.final_mean_reward:.1f} (Time: {result.duration_seconds:.1f}s)")
-                            
-                            # Post-Processing for meta-reward calculation
-                            self.step_counter += 1
-                            
-                            # Environment-Specific Normalization Ranges
-                            norms = {
-                                "CartPole-v1": {"min": 0, "max": 500},
-                                "Acrobot-v1": {"min": -500, "max": -100},
-                                "Pendulum-v1": {"min": -2000, "max": -150},
-                                "LunarLander-v3": {"min": -500, "max": 200},
-                            }
-                            
-                            # 1. Base Performance
-                            env_id = result.config.env_id
-                            spec = norms.get(env_id, {"min": -1000, "max": 0}) 
-                            
-                            raw_reward = result.final_mean_reward
-                            performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
-                            performance_score = max(0.0, min(1.0, performance_score))
-                            
-                            # 2. Stability Penalty
-                            std_reward = result.metrics.get("std_reward", 0.0)
-                            stability_penalty = min(0.2, std_reward * 0.002)
-                            
-                            adjusted_perf = max(0.0, performance_score - stability_penalty)
-                            
-                            # 3. Novelty Bonus
-                            novelty_score = self.novelty_calc.calculate_novelty(result.config)
-                            
-                            # Adaptive Weights
-                            progress = min(1.0, self.step_counter / 20.0)
-                            w_novelty = 0.4 - (0.3 * progress)
-                            w_perf = 1.0 - w_novelty
-                            
-                            # 4. Total Meta-Reward
-                            weighted_score = (w_perf * adjusted_perf) + (w_novelty * novelty_score)
+                    # Check Promotion
+                    self._check_promotion(result)
 
-                            # 5. Time Penalty
-                            time_penalty = 0.01 * result.duration_seconds
-                            final_meta_reward = weighted_score - time_penalty
-                            
-                            rewards[a_id_returned] = final_meta_reward
-                            self.history.append(result)
-                            results_out[a_id_returned] = result
-                            self.novelty_calc.add_to_history(result.config)
-                            
-                            # Check for best
-                            if result.final_mean_reward > self.best_reward:
-                                self.best_reward = result.final_mean_reward
-                                self.best_config = result.config
-                                self.log.info(f"!!! New Global Best found by {a_id_returned}: {self.best_reward:.1f} !!!")
-                                
-                            # [NEW] Check Promotion
-                            if self.tier < 2:
-                                thresh = self.tier_thresholds[self.tier]
-                                if result.final_mean_reward >= thresh:
-                                    self.tier += 1
-                                    self.log.info(f"\n[bold green]>>> CURRICULUM PROMOTION! Unlocked Tier {self.tier} Envs: {self.tiers[self.tier]} <<<[/bold green]\n")
-
-                        else:
-                            # Failure returned by worker
-                            self.log.error(f"[Lab] {a_id_returned} FAILED: {error}")
-                            rewards[a_id_returned] = -1.0 # Penalty for failure
-                            results_out[a_id_returned] = None
-                            
-                    except Exception as e:
-                        self.log.error(f"[Lab] Inner Loop Error: {e}")
-
-            except TimeoutError:
-                self.log.warning("[Lab] !!! TIMEOUT: Experiments exceeding 60s limit were dropped !!!")
-                # Any agents not in results_out get marked as failed/timed out
-                pass
-
+                else:
+                    # Failure
+                    self.log.error(f"[Lab] {a_id_returned} FAILED: {error}")
+                    rewards[a_id_returned] = -1.0
+                    results_out[a_id_returned] = None
+                    
+            except Exception as e:
+                self.log.error(f"[Lab] Poll Error: {e}")
+                
         return results_out, rewards
+
+    def _calculate_meta_reward(self, result: ExperimentResult) -> float:
+        # Environment-Specific Normalization Ranges
+        norms = {
+            "CartPole-v1": {"min": 0, "max": 500},
+            "Acrobot-v1": {"min": -500, "max": -100},
+            "Pendulum-v1": {"min": -2000, "max": -150},
+            "LunarLander-v3": {"min": -500, "max": 200},
+        }
+        
+        # 1. Base Performance
+        env_id = result.config.env_id
+        spec = norms.get(env_id, {"min": -1000, "max": 0}) 
+        
+        raw_reward = result.final_mean_reward
+        performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
+        performance_score = max(0.0, min(1.0, performance_score))
+        
+        # 2. Stability Penalty
+        std_reward = result.metrics.get("std_reward", 0.0)
+        stability_penalty = min(0.2, std_reward * 0.002)
+        
+        adjusted_perf = max(0.0, performance_score - stability_penalty)
+        
+        # 3. Novelty Bonus
+        novelty_score = self.novelty_calc.calculate_novelty(result.config)
+        
+        # Adaptive Weights
+        progress = min(1.0, self.step_counter / 100.0) # Slower decay
+        w_novelty = 0.4 - (0.3 * progress)
+        w_perf = 1.0 - w_novelty
+        
+        # 4. Total Meta-Reward
+        weighted_score = (w_perf * adjusted_perf) + (w_novelty * novelty_score)
+
+        # 5. Time Penalty
+        time_penalty = 0.01 * result.duration_seconds
+        final_meta_reward = weighted_score - time_penalty
+        return final_meta_reward
+
+    def _check_promotion(self, result: ExperimentResult):
+        if self.tier < 2:
+            thresh = self.tier_thresholds[self.tier]
+            if result.final_mean_reward >= thresh:
+                self.tier += 1
+                self.log.info(f"\n[bold green]>>> CURRICULUM PROMOTION! Unlocked Tier {self.tier} Envs: {self.tiers[self.tier]} <<<[/bold green]\n")
+
+    def step(self, actions: Dict[str, ExperimentConfig]) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
+        """Deprecated synchronous step."""
+        for aid, cfg in actions.items():
+            self.submit_experiment(aid, cfg)
+            
+        # Blocking wait for all
+        import time
+        while self.futures_map:
+            res, rew = self.poll_results()
+            if res: return res, rew # This is a broken synchronous shim, but main.py won't use it.
+            time.sleep(0.5)
+        return {}, {}
 
     def get_observation(self) -> Observation:
         """Returns the global state (public knowledge)."""

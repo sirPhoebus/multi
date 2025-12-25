@@ -1,163 +1,151 @@
 import argparse
 import time
+import psutil
 from marl_scientist.env.lab_env import LabEnvironment
 from marl_scientist.agents.researcher import ResearcherAgent
+from marl_scientist.agents.neural_researcher import NeuralResearcherAgent
 from marl_scientist.safeguards.monitor import SingularityMonitor
 from marl_scientist.utils.monitor import export_dashboard_data
 from marl_scientist.utils.plotter import plot_training_curves
 from marl_scientist.utils.logger import setup_logger
+from marl_scientist.knowledge.real_store import RealKnowledgeStore
+from marl_scientist.knowledge.watcher import KnowledgeWatcher
 
 def main():
-    parser = argparse.ArgumentParser(description="Meta-RL Scientist Main Loop")
-    parser.add_argument("--steps", type=int, default=5, help="Number of meta-steps to run")
-    parser.add_argument("--num-agents", type=int, default=2, help="Number of agents to simulate")
+    parser = argparse.ArgumentParser(description="Meta-RL Scientist Async Event Loop")
+    parser.add_argument("--steps", type=int, default=5, help="Number of completed experiments to target")
+    parser.add_argument("--num-agents", type=int, default=1, help="Initial number of agents")
+    parser.add_argument("--max-agents", type=int, default=8, help="Maximum scaling limit")
     parser.add_argument("--agent-type", type=str, default="heuristic", choices=["heuristic", "neural"], help="Type of researcher agent")
     args = parser.parse_args()
     
-    # Setup Logger
     log = setup_logger("simulation.log")
-    
-    log.info("[bold green]=== Initializing Meta-RL Scientist Lab ===[/bold green]")
+    log.info("[bold green]=== Initializing Async Meta-Scientist Ecosystem ===[/bold green]")
     
     # 1. Setup Environment
     lab = LabEnvironment(authorized_benchmarks=["CartPole-v1", "Acrobot-v1", "Pendulum-v1"])
-    
-    # [NEW] Real Knowledge Base integration
-    from marl_scientist.knowledge.real_store import RealKnowledgeStore
     kb = RealKnowledgeStore()
-    
-    # Initial scan of existing files
     kb.ingest_folder("knowledge/") 
     
-    # [NEW] Start Async Watcher
-    from marl_scientist.knowledge.watcher import KnowledgeWatcher
     watcher = KnowledgeWatcher(watch_dir="knowledge/")
     watcher.start()
     
-    # 2. Setup Agents
-    from marl_scientist.agents.neural_researcher import NeuralResearcherAgent
-    
-    agents = []
-    for i in range(args.num_agents):
-        agent_id = f"Agent_{i+1}"
-        if args.agent_type == "neural":
-            agent = NeuralResearcherAgent(agent_id=agent_id)
-        else:
-            agent = ResearcherAgent(agent_id=agent_id)
-        agents.append(agent)
-    
-    # [NEW] Load previous state if available
-    for agent in agents:
-        agent.load(f"saves/{agent.agent_id}.pkl")
-    
-    # [NEW] Distribute Knowledge Shards
-    log.info("Distributing unique knowledge shards to agents...")
-    for i, a in enumerate(agents):
-        shard = kb.get_shard(i, len(agents))
-        a.set_knowledge_store(shard)
-    
     monitor = SingularityMonitor()
     
-    # Track history for plotting
-    history = {a.agent_id: [] for a in agents}
+    # 2. Agent Population Management
+    agents = {} # agent_id -> AgentObj
+    agent_status = {} # agent_id -> "IDLE" or "BUSY"
     
-    log.info(f"Initialized {len(agents)} agents. Starting Meta-Loop for {args.steps} steps...")
+    def spawn_agent(idx):
+        aid = f"Agent_{idx}"
+        log.info(f"[Population] Spawning new agent: [bold cyan]{aid}[/bold cyan]")
+        agent = NeuralResearcherAgent(agent_id=aid)
+        # Try load state if exists
+        try:
+            agent.load(f"saves/{aid}.pkl")
+        except:
+            pass
+        # Give knowledge
+        shard = kb.get_shard(idx, 100) # Pseudo-shard
+        agent.set_knowledge_store(shard)
+        agents[aid] = agent
+        agent_status[aid] = "IDLE"
+        return agent
+
+    # Initialize seed population
+    for i in range(args.num_agents):
+        spawn_agent(i+1)
+        
+    history = {} # agent_id -> [rewards]
+    
+    global_completions = 0
+    start_time = time.time()
+    last_vision_time = time.time()
     
     try:
-        for step in range(args.steps):
-            log.info(f"\n[bold cyan]--- Meta-Step {step+1} ---[/bold cyan]")
+        log.info("Starting Event Loop...")
+        
+        while global_completions < args.steps:
+            # A. Poll for Results
+            results, rewards = lab.poll_results()
             
-            # 1. Observation
-            obs = lab.get_observation()
-            
-            # [NEW] Process any new knowledge files detected by the watcher
+            if results:
+                for aid, res in results.items():
+                    log.info(f"[Event] Experiment completed for {aid}. Reward: {res.final_mean_reward:.1f}")
+                    
+                    if res:
+                        # Update Agent
+                        if aid in agents:
+                            agents[aid].update_knowledge(res)
+                            monitor.check_safety(res)
+                            
+                            if aid not in history: history[aid] = []
+                            history[aid].append(res.final_mean_reward)
+                    
+                    # Mark Free
+                    agent_status[aid] = "IDLE"
+                    global_completions += 1
+                
+                # Update Dashboard immediately on new data
+                export_dashboard_data(list(agents.values()), global_completions)
+
+            # B. Knowledge Updates
             new_files = watcher.get_new_files()
             if new_files:
-                log.info(f"[KnowledgeWatcher] Detected {len(new_files)} new files. Processing...")
+                log.info(f"[Knowledge] Processing {len(new_files)} new papers...")
                 kb.process_file_queue(new_files)
-            
-            # 2. Agent Action & Resource Allocation
-            # Determine trials per agent based on performance
-            # Default: 1 trial. Top performer: 2 trials (if safe).
-            
-            # Identify top agent
-            best_agent = None
-            if step > 0:
-                best_agent = max(agents, key=lambda a: a.best_performance)
-            
-            trial_queue = []
-            for agent in agents:
-                trial_queue.append((agent, agent.agent_id)) # Standard slot
-                
-                # Bonus slot logic
-                if step > 0 and agent == best_agent and agent.best_performance > 0:
-                     log.info(f"[Resource] Granting BONUS trial to top agent: {agent.agent_id}")
-                     trial_queue.append((agent, f"{agent.agent_id}_bonus"))
 
-            actions = {}
-            for agent_obj, run_id in trial_queue:
-                # We need to distinguish the run_id in the actions dict
-                # The agent itself doesn't know about run_id, so we just ask it to propose
-                config = agent_obj.propose_experiment(obs)
-                actions[run_id] = config
-                log.info(f"Agent {run_id} proposes: [yellow]{config.algorithm}[/yellow] with lr={config.hyperparameters.get('learning_rate', 'N/A'):.2e}")
-                
-            # 3. Environment Step
-            log.info("Running experiments (this may take a moment)...")
-            results, rewards = lab.step(actions)
+            # C. Organic Scaling Logic
+            # Count busy agents
+            busy_count = sum(1 for s in agent_status.values() if s == "BUSY")
+            idle_count = sum(1 for s in agent_status.values() if s == "IDLE")
+            total_agents = len(agents)
             
-            # 4. Learning & Safety Check
-            for agent_obj, run_id in trial_queue:
-                if run_id not in results: 
-                    # E.g. agent failed experiment
-                    continue
+            # Simple Heuristic: If everyone is busy, and we have CPU room, spawn more.
+            # We assume lab.executor._max_workers is the limit.
+            max_workers = lab.executor._max_workers
+            
+            if idle_count == 0 and busy_count < max_workers and total_agents < args.max_agents:
+                # Check cooling - don't spawn too fast? No, let's just spawn if slot open.
+                log.info(f"[Scaling] All agents busy ({busy_count}/{max_workers}). Expansion triggered!")
+                spawn_agent(total_agents + 1)
+                
+            # D. Job Submission
+            for aid, agent in agents.items():
+                if agent_status[aid] == "IDLE":
+                    # Propose
+                    obs = lab.get_observation()
+                    config = agent.propose_experiment(obs)
                     
-                result = results[run_id]
-                if result is None:
-                    log.warning(f"Experiment failed for {run_id}, skipping update.")
-                    continue
-                reward = rewards.get(run_id, 0.0)
-                
-                log.info(f"Result for {run_id}: Reward=[bold]{result.final_mean_reward:.2f}[/bold], NoveltyBonus={reward:.2f}")
-                history[agent_obj.agent_id].append(result.final_mean_reward)
-                
-                monitor.check_safety(result)
-                agent_obj.update_knowledge(result)
-                # TODO: In PPO, we'd add this experience to the agent's buffer here.
-                # Since agent_obj is the same instance, it learns from both trials!
-                
-            # 5. Dashboard Export
-            export_dashboard_data(agents, step + 1)
+                    log.info(f"[Dispatch] {aid} -> {config.env_id} ({config.algorithm}) for 30k steps")
+                    lab.submit_experiment(aid, config)
+                    
+                    agent_status[aid] = "BUSY"
             
-            # 6. [NEW] Vision Analysis (Every 5 steps to avoid slowing down too much)
-            if (step + 1) % 5 == 0:
-                log.info("[Vision] Generating plot and requesting analysis (waiting for GLM-4v)...")
+            # E. Periodic Vision Analysis (every 60s)
+            if time.time() - last_vision_time > 60:
+                log.info("[Vision] requesting Snapshot...")
                 plot_path = plot_training_curves(history)
-                
                 try:
                     analysis = kb.client.analyze_image(
                         plot_path, 
-                        prompt="You are a Senior Data Scientist. Analyze this training curve. Are the agents improving? which one is better? Is there any instability?"
+                        prompt="Analyze training progress. Who is winning? Any anomalies?"
                     )
-                    log.info(f"\n[bold magenta]=== GLM-4v Analysis ===[/bold magenta]\n{analysis}\n[bold magenta]=======================[/bold magenta]\n")
-                except Exception as e:
-                    log.error(f"[Vision Error] Analysis skipped: {e}")
-                    
+                    log.info(f"\n[bold magenta]=== GLM-4v Report ===[/bold magenta]\n{analysis}\n")
+                except: pass
+                last_vision_time = time.time()
+                
+            # Prevent CPU burn
+            time.sleep(0.1)
+            
     except KeyboardInterrupt:
-        log.warning("\n[!] Simulation interrupted by user. Exiting gracefully...")
-        # Save on interrupt
-        for agent in agents:
-            agent.save(f"saves/{agent.agent_id}.pkl")
-        
+        log.warning("User Interrupt.")
     finally:
-        # Stop watcher
+        lab.close()
         watcher.stop()
-        
-    # Save on completion
-    for agent in agents:
-         agent.save(f"saves/{agent.agent_id}.pkl")
-         
-    log.info("\n[bold green]=== Experiment Complete ===[/bold green]")
-    
+        for a in agents.values():
+            a.save(f"saves/{a.agent_id}.pkl")
+        log.info("Shutdown complete.")
+
 if __name__ == "__main__":
     main()

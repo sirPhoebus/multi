@@ -204,7 +204,7 @@ class BrainEncoder:
             "gamma": float(scale(hp_vals[1], 0.8, 0.9999)),
             "ent_coef": float(scale(hp_vals[2], 0.0, 0.1)),
             "gae_lambda": float(scale(hp_vals[3], 0.8, 1.0)),
-            "total_timesteps": 2048 # Default to small runs for speed
+            "total_timesteps": 30000 # Increased for realistic exams
         }
         
         # Add algo-specific defaults/scaling
@@ -218,6 +218,6 @@ class BrainEncoder:
              hps["gradient_steps"] = 1 # Force 1 update per step for speed
              hps["tau"] = float(scale(hp_vals[5], 0.005, 0.05))
              hps["batch_size"] = int(scale(hp_vals[4], 64, 256)) # Reuse hp[4] since grad_steps removed
-             hps["total_timesteps"] = 1024 # Extra short for SAC stability check
+             hps["total_timesteps"] = 30000 # Realistic duration
         
         return {"algorithm": algo, "env_id": env, "hyperparameters": hps}
