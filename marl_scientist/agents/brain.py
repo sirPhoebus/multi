@@ -17,7 +17,7 @@ class MetaBrain(nn.Module):
         knowledge_dim: int = 768, # Matches LLM embeddings
         hidden_dim: int = 256,
         num_algos: int = 4,
-        num_envs: int = 5,
+        num_envs: int = 8,
         num_continuous_hps: int = 6
     ):
         super().__init__()
@@ -131,7 +131,10 @@ class BrainEncoder:
     """Helper to convert core objects to tensors for the Brain."""
     
     ALGOS = ["PPO", "A2C", "DQN", "SAC"]
-    ENVS = ["CartPole-v1", "LunarLander-v3", "Pendulum-v1", "Acrobot-v1", "MountainCarContinuous-v0"]
+    ENVS = [
+        "CartPole-v1", "LunarLander-v3", "Pendulum-v1", "Acrobot-v1", 
+        "MountainCarContinuous-v0", "Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"
+    ]
     
     def __init__(self, history_len: int = 10):
         self.history_len = history_len

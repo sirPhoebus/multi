@@ -24,7 +24,8 @@ def main():
     log.info("[bold green]=== Initializing Async Meta-Scientist Ecosystem ===[/bold green]")
     
     # 1. Setup Environment
-    lab = LabEnvironment(authorized_benchmarks=["CartPole-v1", "Acrobot-v1", "Pendulum-v1"])
+    benchmarks = ["CartPole-v1", "Acrobot-v1", "Pendulum-v1", "LunarLander-v3", "MountainCarContinuous-v0", "Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"]
+    lab = LabEnvironment(authorized_benchmarks=benchmarks, max_workers=args.max_agents)
     kb = RealKnowledgeStore()
     kb.ingest_folder("knowledge/") 
     
@@ -102,9 +103,14 @@ def main():
                             population_reward_history.pop(0)
                         
                         pop_mean = sum(population_reward_history) / len(population_reward_history)
-                        relative_reward = rewards[aid] - pop_mean
                         
-                        log.info(f"  - Meta-Reward: {rewards[aid]:.2f} (Rel: {relative_reward:+.2f})")
+                        # [NEW] Swarm Urgency (Survival Cost)
+                        # As the simulation progresses, meta-rewards face a small decay.
+                        # This increases the relative pressure for improvement.
+                        survival_cost = 0.05
+                        relative_reward = (rewards[aid] - pop_mean) - survival_cost
+                        
+                        log.info(f"  - Meta-Reward: {rewards[aid]:.2f} (Rel: {relative_reward:+.2f}, Cost: {survival_cost})")
                         
                         # Update Agent
                         if aid in agents:
@@ -182,11 +188,37 @@ def main():
             proposal_buffer.sort(key=lambda x: x[0])
             
             # 2. Dispatch from buffer to Lab as long as slots are open
+            n_elites = max(1, len(agents) // 4)
+            elite_aids = [aid for _, aid, _ in proposal_buffer[:n_elites]]
+            
             for _, aid, config in proposal_buffer:
                 if busy_count < max_workers:
-                    # [NEW] Dynamic Step Budget
-                    continuous_envs = ["Pendulum-v1", "MountainCarContinuous-v0", "LunarLanderContinuous-v2"]
-                    steps = 80000 if config.env_id in continuous_envs else 30000
+                    # [NEW] Pioneer Pressure
+                    # If elite, we check if they are proposing from the highest unlocked tier
+                    unlocked_envs = lab.tiers[lab.tier]
+                    if aid in elite_aids and config.env_id not in unlocked_envs and lab.tier > 0:
+                        # Force them to a random env from the new tier
+                        import random
+                        old_env = config.env_id
+                        config.env_id = random.choice(unlocked_envs)
+                        log.info(f"[Pioneer] Redirecting Elite {aid} from {old_env} to {config.env_id}!")
+
+                    # [NEW] Tiered Step Budget
+                    if config.env_id in ["CartPole-v1"]:
+                        steps = 30000
+                    elif config.env_id in ["Pendulum-v1", "Acrobot-v1"]:
+                        steps = 100000
+                    elif config.env_id in ["LunarLander-v3"]:
+                        steps = 200000
+                    elif config.env_id in ["MountainCarContinuous-v0"]:
+                        steps = 300000
+                    elif config.env_id in ["Hopper-v4", "Walker2d-v4"]:
+                        steps = 500000
+                    elif config.env_id in ["HalfCheetah-v4"]:
+                        steps = 1000000
+                    else:
+                        steps = 50000
+                        
                     config.hyperparameters["total_timesteps"] = steps
                     
                     log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for {steps//1000}k steps")

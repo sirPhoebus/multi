@@ -12,7 +12,7 @@ class LabEnvironment(MetaEnvironment):
     """
     The 'Lab' where Researcher Agents submit their experiment configurations.
     """
-    def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"]):
+    def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"], max_workers: int = 8):
         self.log = setup_logger()
         self.benchmarks = authorized_benchmarks
         # Cache metadata for benchmarks
@@ -31,17 +31,19 @@ class LabEnvironment(MetaEnvironment):
         self.tiers = {
             0: ["CartPole-v1", "Pendulum-v1"],
             1: ["LunarLander-v3", "Acrobot-v1"],
-            2: ["MountainCarContinuous-v0"]
+            2: ["MountainCarContinuous-v0"],
+            3: ["Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"]
         }
         # Threshold to UNLOCK next tier
         self.tier_thresholds = {
             0: 450.0, # CartPole/Pendulum solved
             1: 200.0, # LunarLander solved
-            2: float('inf')
+            2: 90.0,  # MountainCar solved (or progressed)
+            3: float('inf')
         }
     
         # [NEW] Async Executor
-        self.executor = ProcessPoolExecutor(max_workers=8) # Fixed pool size
+        self.executor = ProcessPoolExecutor(max_workers=max_workers)
         self.futures_map = {} # future -> (agent_id, start_time)
         self.running_experiments = {} # agent_id -> config
         
@@ -173,7 +175,10 @@ class LabEnvironment(MetaEnvironment):
             "Acrobot-v1": {"min": -500, "max": -100},
             "Pendulum-v1": {"min": -2000, "max": -150},
             "LunarLander-v3": {"min": -500, "max": 200},
-            "MountainCarContinuous-v0": {"min": -100, "max": 100}
+            "MountainCarContinuous-v0": {"min": -100, "max": 100},
+            "Hopper-v4": {"min": 0, "max": 3000},
+            "Walker2d-v4": {"min": 0, "max": 3500},
+            "HalfCheetah-v4": {"min": 0, "max": 6000}
         }
         
         # 1. Base Performance (0 to 1)
@@ -191,7 +196,14 @@ class LabEnvironment(MetaEnvironment):
         # 3. Efficiency Score (Speed) (0 to 1)
         # Non-linear penalty: sqrt(penalty) makes it gentler initially.
         duration_ratio = min(1.0, result.duration_seconds / 150.0)
-        result.efficiency_score = max(0.0, 1.0 - np.sqrt(duration_ratio))
+        eff_score = max(0.0, 1.0 - np.sqrt(duration_ratio))
+        
+        # [NEW] Failure-Aware Capping
+        # If the agent failed the task (performance < 10%), we don't reward speed.
+        if result.performance_score < 0.1:
+            eff_score = min(eff_score, 0.1)
+            
+        result.efficiency_score = eff_score
         
         # 4. Novelty Score (0 to 1)
         novelty_score = self.novelty_calc.calculate_novelty(result.config)
