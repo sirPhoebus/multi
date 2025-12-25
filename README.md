@@ -24,9 +24,20 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
 - **Leaderboard**: Real-time ranking of agents by meta-reward and efficiency.
 - **Resource Allocation**: Top performers receive **Bonus Experiment Slots**, accelerating their research.
 
-### � Optimized Knowledge Pipeline
-- **Async Ingestion**: Background `KnowledgeWatcher` and Smart Caching ensure zero-latency knowledge updates.
-- **LLM-RAG**: Agents consult a vector store of research papers to inform their hypotheses.
+### 💾 Long-Term Episodic Memory
+- **Experiment Persistence**: Agents store and retrieve successful experiment configurations to initialize new search processes.
+- **Context Injection**: The best past hyperparameters are injected directly into the Brain as a conditioning vector.
+
+### 🏛️ Hierarchical Strategic Planning
+- **Manager-Worker Core**: The Brain first determines a **Strategic Intent** (EXPLORE, EXPLOIT, or REFINE) before proposing tactical configurations.
+- **Goal-Conditioned Policies**: Lower-level worker heads are soft-conditioned on the selected strategic goal.
+
+### 🎭 Multi-Objective "Specialists"
+- **Scientist Profiles**: Agents are spawned with distinct research mandates:
+    - **Perf-Max**: Focused on absolute reward.
+    - **Fast-Efficient**: Prioritizes speed and sample efficiency.
+    - **Stable-Reliable**: Prioritizes consistency and low variance.
+- **Multi-Objective Rewards**: Laboratory evaluation incorporates Performance, Stability, Efficiency, and Novelty into a single weighted meta-reward.
 
 ---
 
@@ -42,6 +53,7 @@ graph TD
     D -->|Reward| A
     D -->|Check Promotion| B
     A -->|Consult| E[Knowledge Store]
+    A <-->|Recall| F[Episodic Memory]
 ```
 
 ---
@@ -56,12 +68,12 @@ pip install watchdog
 
 ### Running the Neural Scientist
 ```bash
-# Start a 2-agent simulation for 10 meta-steps
-python marl_scientist/main.py --agent-type neural --num-agents 2 --steps 10
+# Start a 4-agent simulation with different "Scientist Profiles"
+python marl_scientist/main.py --agent-type neural --num-agents 4 --steps 20
 ```
 
 ### Adding New Knowledge
-Drop `.txt` files into `knowledge/`. The **Async Watcher** will instantly ingest and embed them without stopping the simulation.
+Drop `.txt` or `.md` files into `knowledge/`. The **Async Watcher** will instantly ingest and embed them without stopping the simulation.
 
 ---
 
@@ -71,10 +83,10 @@ Drop `.txt` files into `knowledge/`. The **Async Watcher** will instantly ingest
 - [x] Async Knowledge Ingestion
 - [x] Swarm Dynamics (Leaderboard, Bonus Slots)
 - [x] Curriculum Learning (Tiers, Auto-Promotion)
-- [ ] Add memory mechanisms for long-term knowledge retention
-- [ ] Implement hierarchical decision-making
-- [ ] Include multi-task learning scenarios
-- [ ] Add self-supervised learning objectives
+- [x] Long-Term Episodic Memory
+- [x] Hierarchical Decision-Making
+- [x] Multi-Task Learning Scenarios
+- [ ] Self-supervised learning objectives for Brain Pre-Training
 - [ ] Multi-Agent Competitive Meta-Training (Self-Play)
 - [ ] Dynamic Neural Architecture Synthesis
 

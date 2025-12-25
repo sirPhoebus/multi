@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional, List
 from marl_scientist.core import Researcher, Observation, ExperimentConfig, ExperimentResult
 from marl_scientist.agents.brain import MetaBrain, BrainEncoder
 from marl_scientist.agents.memory import EpisodicMemory
+from marl_scientist.utils.logger import setup_logger
 
 class NeuralResearcherAgent(Researcher):
     """
@@ -14,6 +15,7 @@ class NeuralResearcherAgent(Researcher):
         self.agent_id = agent_id
         self.encoder = BrainEncoder()
         self.memory = EpisodicMemory()
+        self.log = setup_logger()
         
         # Initialize Brain
         self.brain = MetaBrain()
@@ -25,6 +27,9 @@ class NeuralResearcherAgent(Researcher):
                 print(f"[NeuralResearcher] Failed to load brain, using random init.")
         
         self.brain.eval() # Deployment mode by default
+        
+        # [NEW] Multi-Task Preference [Performance, Efficiency, Stability]
+        self.preference_vec = np.array([0.5, 0.25, 0.25]) 
         
         # Recurrent state
         self.hidden_state = None
@@ -102,14 +107,23 @@ class NeuralResearcherAgent(Researcher):
             mem_vec = self.memory.retrieve_vector(target_env_context)
             mem_tensor = torch.tensor(mem_vec, dtype=torch.float32).unsqueeze(0) # [1, 6]
             
-            # Forward pass with Context
-            algo_logits, env_logits, hp_means, value, new_hidden = self.brain(
+            pref_tensor = torch.tensor(self.preference_vec, dtype=torch.float32).unsqueeze(0) # [1, 3]
+            
+            # Forward pass with Context (Hierarchical)
+            algo_logits, env_logits, hp_means, value, new_hidden, goal_logits = self.brain(
                 inputs["history"],
                 inputs["trends"],
                 inputs["knowledge"],
                 mem_tensor, 
+                pref_tensor, # [NEW] Preference Injection
                 self.hidden_state
             )
+            
+            # [NEW] Strategic Logging
+            intents = ["EXPLORE", "EXPLOIT", "REFINE"]
+            goal_idx = torch.argmax(goal_logits, dim=-1).item()
+            intent_str = intents[goal_idx]
+            self.log.info(f"[{self.agent_id}] Strategic Intent: {intent_str}")
             
             # Curriculum Masking
             if allowed_names:

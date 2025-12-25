@@ -26,6 +26,11 @@ class ExperimentResult:
     start_time: float = 0.0
     total_env_steps: int = 0
     
+    # [NEW] Multi-Task Scores (0 to 1)
+    performance_score: float = 0.0
+    efficiency_score: float = 0.0
+    stability_score: float = 0.0
+    
     final_model_path: Optional[str] = None
     info: Dict[str, Any] = dataclasses.field(default_factory=dict)
 

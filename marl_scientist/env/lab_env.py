@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import gymnasium as gym
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,7 +47,15 @@ class LabEnvironment(MetaEnvironment):
         
     def close(self):
         if self.executor:
-            self.executor.shutdown(wait=False)
+            # Try to cancel pending work and shutdown
+            try:
+                self.executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python < 3.9 doesn't support cancel_futures
+                self.executor.shutdown(wait=False)
+            
+            # Note: On Windows, workers might still hang if they are blocked in a C-extension.
+            # We've done what we can to signal termination.
 
     @property
     def allowed_envs(self) -> List[str]:
@@ -85,7 +93,7 @@ class LabEnvironment(MetaEnvironment):
         self.futures_map[fut] = (agent_id, time.time())
         self.running_experiments[agent_id] = config
 
-    def poll_results(self) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
+    def poll_results(self, agent_preferences: Optional[Dict[str, np.ndarray]] = None) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
         """Checks for completed experiments without blocking."""
         import time
         results_out = {}
@@ -119,7 +127,13 @@ class LabEnvironment(MetaEnvironment):
                     
                     # Post-Processing
                     self.step_counter += 1
-                    meta_reward = self._calculate_meta_reward(result)
+                    
+                    # Apply Agent-Specific Preference if available
+                    pref = None
+                    if agent_preferences and a_id_returned in agent_preferences:
+                        pref = agent_preferences[a_id_returned]
+                        
+                    meta_reward = self._calculate_meta_reward(result, preference=pref)
                     
                     rewards[a_id_returned] = meta_reward
                     self.history.append(result)
@@ -146,43 +160,52 @@ class LabEnvironment(MetaEnvironment):
                 
         return results_out, rewards
 
-    def _calculate_meta_reward(self, result: ExperimentResult) -> float:
-        # Environment-Specific Normalization Ranges
+    def _calculate_meta_reward(self, result: ExperimentResult, preference: Optional[np.ndarray] = None) -> float:
+        """
+        Calculates a meta-reward based on multiple objectives.
+        preference: [Perf, Efficiency, Stability] - sums to 1.0 (roughly)
+        """
+        if preference is None:
+            preference = np.array([0.6, 0.2, 0.2]) # Default: Focus on Perf
+            
         norms = {
             "CartPole-v1": {"min": 0, "max": 500},
             "Acrobot-v1": {"min": -500, "max": -100},
             "Pendulum-v1": {"min": -2000, "max": -150},
             "LunarLander-v3": {"min": -500, "max": 200},
+            "MountainCarContinuous-v0": {"min": -100, "max": 100}
         }
         
-        # 1. Base Performance
+        # 1. Base Performance (0 to 1)
         env_id = result.config.env_id
         spec = norms.get(env_id, {"min": -1000, "max": 0}) 
-        
         raw_reward = result.final_mean_reward
         performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
-        performance_score = max(0.0, min(1.0, performance_score))
+        result.performance_score = max(0.0, min(1.0, performance_score))
         
-        # 2. Stability Penalty
+        # 2. Stability Score (0 to 1)
         std_reward = result.metrics.get("std_reward", 0.0)
-        stability_penalty = min(0.2, std_reward * 0.002)
+        # Low std -> high stability. Normalize 0 to 50 -> 1 to 0
+        result.stability_score = max(0.0, 1.0 - (std_reward / 50.0))
         
-        adjusted_perf = max(0.0, performance_score - stability_penalty)
+        # 3. Efficiency Score (Speed) (0 to 1)
+        # Normalize relative to 120s limit
+        result.efficiency_score = max(0.0, 1.0 - (result.duration_seconds / 120.0))
         
-        # 3. Novelty Bonus
+        # 4. Novelty Score (0 to 1)
         novelty_score = self.novelty_calc.calculate_novelty(result.config)
         
-        # Adaptive Weights
-        progress = min(1.0, self.step_counter / 100.0) # Slower decay
-        w_novelty = 0.4 - (0.3 * progress)
-        w_perf = 1.0 - w_novelty
+        # --- Weighted Sum ---
+        w_perf, w_effic, w_stable = preference
+        w_novelty = 0.2
         
-        # 4. Total Meta-Reward
-        weighted_score = (w_perf * adjusted_perf) + (w_novelty * novelty_score)
-
-        # 5. Time Penalty
-        time_penalty = 0.01 * result.duration_seconds
-        final_meta_reward = weighted_score - time_penalty
+        final_meta_reward = (
+            (w_perf * result.performance_score) + 
+            (w_effic * result.efficiency_score) + 
+            (w_stable * result.stability_score) +
+            (w_novelty * novelty_score)
+        )
+        
         return final_meta_reward
 
     def _check_promotion(self, result: ExperimentResult):

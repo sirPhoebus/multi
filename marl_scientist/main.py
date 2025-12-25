@@ -1,5 +1,6 @@
 import argparse
 import time
+import numpy as np
 import psutil
 from marl_scientist.env.lab_env import LabEnvironment
 from marl_scientist.agents.researcher import ResearcherAgent
@@ -36,10 +37,25 @@ def main():
     agents = {} # agent_id -> AgentObj
     agent_status = {} # agent_id -> "IDLE" or "BUSY"
     
+    # [NEW] Scientist Profiles [Performance, Efficiency, Stability]
+    PROFILES = {
+        0: np.array([0.8, 0.1, 0.1]), # The Perf-Maximizer
+        1: np.array([0.1, 0.8, 0.1]), # The Fast-Efficient
+        2: np.array([0.1, 0.1, 0.8]), # The Stable-Reliable
+        3: np.array([0.4, 0.3, 0.3]), # The Balanced
+    }
+    
     def spawn_agent(idx):
         aid = f"Agent_{idx}"
         log.info(f"[Population] Spawning new agent: [bold cyan]{aid}[/bold cyan]")
         agent = NeuralResearcherAgent(agent_id=aid)
+        
+        # Assign Profile
+        profile_idx = idx % len(PROFILES)
+        agent.preference_vec = PROFILES[profile_idx]
+        profile_names = ["Perf-Max", "Fast-Efficient", "Stable-Reliable", "Balanced"]
+        log.info(f"  - Profile: [yellow]{profile_names[profile_idx]}[/yellow] {agent.preference_vec}")
+
         # Try load state if exists
         try:
             agent.load(f"saves/{aid}.pkl")
@@ -67,7 +83,9 @@ def main():
         
         while global_completions < args.steps:
             # A. Poll for Results
-            results, rewards = lab.poll_results()
+            # Pass Current Preferences for Meta-Reward calculation
+            prefs = {aid: a.preference_vec for aid, a in agents.items()}
+            results, rewards = lab.poll_results(agent_preferences=prefs)
             
             if results:
                 for aid, res in results.items():
@@ -146,6 +164,9 @@ def main():
         for a in agents.values():
             a.save(f"saves/{a.agent_id}.pkl")
         log.info("Shutdown complete.")
+    
+    import sys
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()

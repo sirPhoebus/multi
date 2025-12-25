@@ -40,13 +40,20 @@ class MetaBrain(nn.Module):
         )
         
         # 4. Fusion & Decision Core
-        # Trends (hidden_dim) + Knowledge (hidden_dim) + RNN (hidden_dim) + [NEW] MemoryContext (6)
-        self.obs_dim = hidden_dim * 3 + 6 
+        # Trends (hidden_dim) + Knowledge (hidden_dim) + RNN (hidden_dim) + [NEW] MemoryContext (6) + [NEW] Preference (3)
+        self.obs_dim = hidden_dim * 3 + 6 + 3 
         
         self.fusion = nn.Linear(self.obs_dim, hidden_dim)
         self.decision_rnn = nn.GRUCell(hidden_dim, hidden_dim) 
+
+        # [NEW] Hierarchical Goal Head (Manager)
+        # 3 Goals: 0=EXPLORE, 1=EXPLOIT, 2=REFINE
+        self.goal_head = nn.Linear(hidden_dim, 3) 
         
-        # 5. Policy Heads
+        # Worker Fusion (Conditioned on Goal)
+        self.worker_fusion = nn.Linear(hidden_dim + 3, hidden_dim)
+        
+        # 5. Policy Heads (Now Worker Heads)
         self.algo_head = nn.Linear(hidden_dim, num_algos)
         self.env_head = nn.Linear(hidden_dim, num_envs)
         
@@ -63,9 +70,10 @@ class MetaBrain(nn.Module):
         history_seq: torch.Tensor,     # (batch, seq_len, history_dim)
         trends: torch.Tensor,          # (batch, trend_dim)
         knowledge: torch.Tensor,       # (batch, knowledge_dim)
-        memory_context: torch.Tensor = None, # [NEW] (batch, 6)
+        memory_context: torch.Tensor = None, # (batch, 6)
+        preference_vec: torch.Tensor = None, # [NEW] (batch, 3) -> [Perf, Efficiency, Stability]
         hidden_state: torch.Tensor = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
         batch_size = trends.size(0)
         
@@ -79,12 +87,14 @@ class MetaBrain(nn.Module):
         h_trends = self.trends_mlp(trends)
         h_know = self.knowledge_mlp(knowledge)
         
-        # Handle Missing Context
+        # Handle Missing Contexts
         if memory_context is None:
             memory_context = torch.zeros(batch_size, 6, device=trends.device)
+        if preference_vec is None:
+            preference_vec = torch.tensor([[0.5, 0.25, 0.25]], device=trends.device).repeat(batch_size, 1)
         
         # Fusion
-        combined = torch.cat([h_hist, h_trends, h_know, memory_context], dim=-1)
+        combined = torch.cat([h_hist, h_trends, h_know, memory_context, preference_vec], dim=-1)
         latent = F.relu(self.fusion(combined))
         
         # Session state update
@@ -92,15 +102,23 @@ class MetaBrain(nn.Module):
             hidden_state = torch.zeros_like(latent)
         
         new_hidden = self.decision_rnn(latent, hidden_state)
+
+        # [NEW] Hierarchical Strategic Step
+        goal_logits = self.goal_head(new_hidden)
+        goal_selected = torch.softmax(goal_logits, dim=-1) # soft-conditioning for training
         
-        # Heads
-        algo_logits = self.algo_head(new_hidden)
-        env_logits = self.env_head(new_hidden)
-        hp_means = torch.tanh(self.hp_mean_head(new_hidden)) 
+        # Worker Decisions conditioned on Goal
+        worker_input = torch.cat([new_hidden, goal_selected], dim=-1)
+        worker_latent = F.relu(self.worker_fusion(worker_input))
         
-        value = self.value_head(new_hidden)
+        # Heads (Worker)
+        algo_logits = self.algo_head(worker_latent)
+        env_logits = self.env_head(worker_latent)
+        hp_means = torch.tanh(self.hp_mean_head(worker_latent)) 
         
-        return algo_logits, env_logits, hp_means, value, new_hidden
+        value = self.value_head(worker_latent)
+        
+        return algo_logits, env_logits, hp_means, value, new_hidden, goal_logits
 
 class BrainEncoder:
     """Helper to convert core objects to tensors for the Brain."""
