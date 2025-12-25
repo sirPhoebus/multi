@@ -13,7 +13,11 @@ def export_dashboard_data(agents, step, filepath="marl_scientist/dashboard/data.
     
     for agent in agents:
         # Get graph data from networkx
-        g = agent.causal_model.graph
+        if hasattr(agent, "causal_model"):
+            g = agent.causal_model.graph
+        else:
+            # Fallback for Neural Agents or others without explicit text graphs
+            g = nx.DiGraph()
         
         # Format nodes
         nodes = []

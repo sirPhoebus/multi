@@ -87,7 +87,7 @@ class LLMClient:
             "messages": messages,
             "model": self.chat_model,
             "temperature": temperature,
-            "max_tokens": 500
+            "max_tokens": 1500
         }
         
         try:

@@ -23,95 +23,185 @@ class RealKnowledgeStore:
         self.journal_metadatas: List[Dict] = []
         self.journal_embeddings: Optional[np.ndarray] = None
         
+        # [NEW] Embedding Cache
+        self.embedding_cache: Dict[int, np.ndarray] = {}
+        self.load_cache()
+        
         self.load()
 
-    def ingest_references(self, filepath: str):
+    def load_cache(self, path="kb_cache.pkl"):
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                self.embedding_cache = pickle.load(f)
+
+    def save_cache(self, path="kb_cache.pkl"):
+        with open(path, "wb") as f:
+            pickle.dump(self.embedding_cache, f)
+
+    def process_file_queue(self, file_paths: List[str]):
         """
-        Parses ref.md and ingests papers if not already loaded.
+        Processes a specific list of files (e.g. from the Watcher).
+        Hashes content to check cache before embedding.
         """
-        if len(self.documents) > 0:
-            print(f"[KnowledgeStore] Loaded {len(self.documents)} papers (Dense).")
+        if not file_paths:
             return
 
-        print(f"[KnowledgeStore] Ingesting papers from {filepath}...")
-        with open(filepath, 'r', encoding='utf-8') as f:
-            content = f.read()
-            
-        # Naive parsing of markdown list
-        # Pattern 1: - [Title](link) - Focus: ... (Markdown link)
-        # Pattern 2: Title - Link: ... - Focus: ... (Plain text)
-        # We try a versatile regex or multiple
+        import shutil
+        archive_path = os.path.join(os.path.dirname(file_paths[0]), "processed")
+        os.makedirs(archive_path, exist_ok=True)
         
-        # New robust parsing logic
-        content_lines = content.split('\n')
         new_docs = []
         new_metas = []
+        processed_files = []
+        docs_to_embed = []
+        doc_indices_to_embed = [] # Map index in new_docs to index in docs_to_embed
         
-        for line in content_lines:
-            line = line.strip()
-            if not line: continue
+        cached_embeddings = []
+
+        print(f"[KnowledgeStore] Processing {len(file_paths)} queued files...")
+
+        for file_path in file_paths:
+            if not os.path.exists(file_path): continue
             
-            # Remove leading dash/bullet if present
-            clean_line = line.lstrip("- ").strip()
-            
-            # Check for Link and Focus
-            if "Focus:" in clean_line:
-                # Attempt to extract parts
-                # 1. Look for Link
-                link = "unknown"
-                title = "unknown"
-                focus = "unknown"
+            try:
+                filename = os.path.basename(file_path)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
                 
-                # Split by " - " is risky if title has it, but standard format seems to be separators
-                # Let's try regex for the specific format seen in file
-                
-                # Regex for: "Title (Venue) - Link: url - Focus: desc"
-                # Optional "Authors: ... - "
-                match = re.search(r"(.*?)\s-\s(?:Authors:.*?\s-\s)?(?:Link:|Link)\s*(.*?)\s-\sFocus:\s*(.*)", clean_line)
-                
-                if match:
-                    title = match.group(1).strip()
-                    link = match.group(2).strip()
-                    focus = match.group(3).strip()
-                    
-                    # Clean title if it has markdown link syntax leftovers
-                    # e.g. "[Title](...)"
-                    m_link = re.search(r"\[(.*?)\]", title)
-                    if m_link: 
-                        title = m_link.group(1)
-                        
-                    new_docs.append(f"{title}. {focus}")
-                    new_metas.append({"title": title, "link": link, "focus": focus, "source": "ref_md"})
+                if not content:
+                    shutil.move(file_path, os.path.join(archive_path, filename))
                     continue
+                
+                title = os.path.splitext(filename)[0].replace("_", " ").title()
+                full_text = f"{title}. {content}"
+                text_hash = hash(full_text)
+                
+                new_docs.append(full_text)
+                new_metas.append({
+                    "title": title, 
+                    "filename": filename,
+                    "source": "filesystem",
+                    "ingested_at": str(os.path.getmtime(file_path))
+                })
+                processed_files.append((file_path, filename))
+                
+                # Check Cache
+                if text_hash in self.embedding_cache:
+                    cached_embeddings.append(self.embedding_cache[text_hash])
+                else:
+                    docs_to_embed.append(full_text)
+                    doc_indices_to_embed.append(len(new_docs) - 1)
+                    # We will insert placeholders or logic to merge later
                     
-                # Regex for Markdown Link style: "[Title](Link) - Focus: ..."
-                match_md = re.search(r"\[(.*?)\]\((.*?)\)\s-\sFocus:\s*(.*)", clean_line)
-                if match_md:
-                     new_docs.append(f"{match_md.group(1)}. {match_md.group(3)}")
-                     new_metas.append({"title": match_md.group(1), "link": match_md.group(2), "focus": match_md.group(3), "source": "ref_md"})
-                     continue
-        
-        # Fallback if manual parsing loop finishes (we don't use the old regex findall anymore)
-        matches = [] # Dummy to satisfy old code flow if we didn't replace it fully, but we will replace the loop below too.
-        
-        # Since we populated new_docs in the loop, we are good.
-        pass
-            
+            except Exception as e:
+                print(f"[KnowledgeStore] Failed to read {file_path}: {e}")
+
         if not new_docs:
-            print("[KnowledgeStore] Warning: No papers found in ref.md")
             return
 
+        # Generate Embeddings for novel items
+        final_new_embeddings = np.zeros((len(new_docs), 768), dtype=np.float32)
+        
+        # Fill from cache first (inefficient double loop but clear)
+        # Re-iterating to map correctly
+        current_embed_idx = 0
+        current_cache_idx = 0
+        
+        new_vectors_computed = []
+
+        if docs_to_embed:
+             print(f"[KnowledgeStore] Embedding {len(docs_to_embed)} new items (Cache Hit: {len(new_docs)-len(docs_to_embed)})...")
+             computed_vectors = self.client.get_embeddings_batch(docs_to_embed)
+             
+             # Save to cache
+             for txt, vec in zip(docs_to_embed, computed_vectors):
+                 self.embedding_cache[hash(txt)] = vec
+             self.save_cache()
+             
+             new_vectors_computed = computed_vectors
+        
+        # Assemble final array
+        # This logic is a bit tricky with split lists. 
+        # Easier: Re-loop using cache which is now complete.
+        
+        assembled_list = []
+        for doc in new_docs:
+            assembled_list.append(self.embedding_cache[hash(doc)])
+            
+        final_new_embeddings = np.array(assembled_list, dtype=np.float32)
+
+        # Add to memory
         self.documents.extend(new_docs)
         self.metadatas.extend(new_metas)
         
-        # Generate Embeddings via LLM
-        print(f"[KnowledgeStore] Generating embeddings for {len(new_docs)} papers via LLM. This may take a moment...")
-        try:
-            self.embeddings = self.client.get_embeddings_batch(self.documents)
-            self.save()
-        except Exception as e:
-            print(f"[KnowledgeStore] Embedding generation failed: {e}")
-            self.embeddings = np.zeros((len(self.documents), 768)) # Fallback dummy
+        if self.embeddings is None:
+            self.embeddings = final_new_embeddings
+        else:
+            self.embeddings = np.vstack([self.embeddings, final_new_embeddings])
+        
+        # Save DB
+        self.save()
+        
+        # Move Files
+        for src, fname in processed_files:
+            try:
+                shutil.move(src, os.path.join(archive_path, fname))
+            except:
+                pass
+            
+        print(f"[KnowledgeStore] Ingested {len(new_docs)} items.")
+
+    def ingest_folder(self, folder_path: str):
+        """
+        Reads all text files in a directory. Redirects to process_file_queue.
+        """
+        if not os.path.exists(folder_path): return
+        files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.endswith(".txt") or f.endswith(".md")]
+        if files:
+            self.process_file_queue(files)
+
+    def ingest_references(self, filepath: str):
+        """
+        Deprecated: Parses ref.md. Redirects to ingest_folder if filepath is a directory.
+        """
+        if os.path.isdir(filepath):
+            return self.ingest_folder(filepath)
+        
+        # Original ref.md logic (left for compatibility if needed, but updated to use ingest_folder style)
+        if not os.path.exists(filepath): return
+        
+        print(f"[KnowledgeStore] Ingesting papers from {filepath}...")
+        with open(filepath, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        new_docs = []
+        new_metas = []
+        
+        content_lines = content.split('\n')
+        for line in content_lines:
+            line = line.strip()
+            if not line: continue
+            clean_line = line.lstrip("- ").strip()
+            
+            if "Focus:" in clean_line:
+                match = re.search(r"(.*?)\s-\s(?:Authors:.*?\s-\s)?(?:Link:|Link)\s*(.*?)\s-\sFocus:\s*(.*)", clean_line)
+                if match:
+                    title = match.group(1).strip()
+                    new_docs.append(f"{title}. {match.group(3).strip()}")
+                    new_metas.append({"title": title, "source": "ref_md"})
+                    continue
+                
+                match_md = re.search(r"\[(.*?)\]\((.*?)\)\s-\sFocus:\s*(.*)", clean_line)
+                if match_md:
+                     new_docs.append(f"{match_md.group(1)}. {match_md.group(3).strip()}")
+                     new_metas.append({"title": match_md.group(1), "source": "ref_md"})
+
+        if not new_docs: return
+
+        self.documents.extend(new_docs)
+        self.metadatas.extend(new_metas)
+        self.embeddings = self.client.get_embeddings_batch(self.documents)
+        self.save()
 
     def search(self, query: str, k: int = 3) -> List[Dict[str, Any]]:
         """
@@ -280,7 +370,7 @@ Rules:
 2. "env_id" should be inferred from the text if possible (e.g. if it mentions balance/poles, use CartPole; if it mentions landing/moon, use LunarLander). Default to "CartPole-v1" if unsure.
 3. "hyperparameters" should include things like "learning_rate", "gamma", "ent_coef", etc. inferred from the text.
 4. STRICT JSON only. No comments. No trailing commas.
-5. Use standard float notation (e.g. 0.001), avoid unquoted expressions.
+5. Provide your response in English. No Chinese.
 """
         import json
         import re
@@ -290,10 +380,21 @@ Rules:
             try:
                 response = self.client.chat_completion([{"role": "user", "content": prompt}], temperature=0.2)
                 
+                if not response:
+                    raise ValueError("Empty response from LLM")
+
                 # Sanitization
-                # 1. Strip <think>...</think> blocks if present (Reasoning Models)
-                clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-                
+                # 1. Strip <think>...</think> blocks if present
+                # Handle truncated think blocks (where </think> is missing)
+                clean_response = response
+                if "<think>" in response:
+                    if "</think>" in response:
+                        clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+                    else:
+                        # Truncated inside think. Remove everything from <think> to end
+                        start_think = response.find("<think>")
+                        clean_response = response[:start_think].strip()
+
                 # 2. Strip markdown code blocks
                 clean_text = clean_response.replace("```json", "").replace("```", "").strip()
                 
@@ -303,11 +404,14 @@ Rules:
                 if start != -1 and end != -1:
                     clean_text = clean_text[start:end+1]
                 
+                if not clean_text:
+                    raise ValueError("No JSON object found in response")
+
                 config = json.loads(clean_text)
                 
                 # Simple Validation
                 if "algorithm" not in config or "hyperparameters" not in config:
-                    raise ValueError("Missing fields in LLM output")
+                    raise ValueError("Missing fields in LLM output JSON")
                     
                 return config
             except Exception as e:

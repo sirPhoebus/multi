@@ -51,14 +51,12 @@ class LabEnvironment(MetaEnvironment):
             results: Dictionary of ExperimentResult objects (agent_id -> Result).
             rewards: Dictionary of float rewards (agent_id -> reward).
         """
+        import time
         results_out = {}
         rewards = {}
         
         # Run Experiments in Parallel
-        # We use a ProcessPoolExecutor to truly parallelize the gym loops
-        
-        results_map = {}
-        futures = []
+        futures_map = {}
         
         # Determine max workers
         max_workers = min(len(actions), 8)
@@ -67,65 +65,88 @@ class LabEnvironment(MetaEnvironment):
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             for agent_id, config in actions.items():
+                if config is None: continue
                 self.log.info(f"[Lab] Scheduling {agent_id} on {config.env_id} ({config.algorithm})...")
-                futures.append(executor.submit(run_experiment_task, config, agent_id))
+                fut = executor.submit(run_experiment_task, config, agent_id)
+                futures_map[fut] = (agent_id, time.time())
             
             # Collect results
             self.log.info(f"[Lab] Waiting for completion...")
-            for future in as_completed(futures):
-                a_id, result, error = future.result()
-                if result:
-                    results_map[a_id] = result
-                    self.log.info(f"[Lab] {a_id} finished: {result.final_mean_reward:.1f}")
-                else:
-                    self.log.error(f"[Lab] {a_id} FAILED: {error}")
-                    # Handle failure gracefully?
-                    pass
+            for future in as_completed(futures_map):
+                a_id, t_start = futures_map[future]
+                try:
+                    a_id_returned, result, error = future.result()
+                    t_end = time.time()
+                    
+                    if result:
+                        # Success
+                        result.duration_seconds = t_end - t_start
+                        result.total_env_steps = result.config.hyperparameters.get("n_timesteps", 0)
+                        
+                        self.log.info(f"[Lab] {a_id_returned} finished: {result.final_mean_reward:.1f} (Time: {result.duration_seconds:.1f}s)")
+                        
+                        # Post-Processing for meta-reward calculation
+                        self.step_counter += 1
+                        
+                        # Environment-Specific Normalization Ranges
+                        norms = {
+                            "CartPole-v1": {"min": 0, "max": 500},
+                            "Acrobot-v1": {"min": -500, "max": -100},
+                            "Pendulum-v1": {"min": -2000, "max": -150},
+                            "LunarLander-v3": {"min": -500, "max": 200},
+                        }
+                        
+                        # 1. Base Performance
+                        env_id = result.config.env_id
+                        spec = norms.get(env_id, {"min": -1000, "max": 0}) 
+                        
+                        raw_reward = result.final_mean_reward
+                        performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
+                        performance_score = max(0.0, min(1.0, performance_score))
+                        
+                        # 2. Stability Penalty
+                        std_reward = result.metrics.get("std_reward", 0.0)
+                        stability_penalty = min(0.2, std_reward * 0.002)
+                        
+                        adjusted_perf = max(0.0, performance_score - stability_penalty)
+                        
+                        # 3. Novelty Bonus
+                        novelty_score = self.novelty_calc.calculate_novelty(result.config)
+                        
+                        # Adaptive Weights
+                        progress = min(1.0, self.step_counter / 20.0)
+                        w_novelty = 0.4 - (0.3 * progress)
+                        w_perf = 1.0 - w_novelty
+                        
+                        # 4. Total Meta-Reward
+                        weighted_score = (w_perf * adjusted_perf) + (w_novelty * novelty_score)
 
-        # Post-Processing
-        self.step_counter += 1
-        
-        # Adaptive Weights
-        # Decay exploration weight from 0.4 to 0.1 over 20 steps
-        # Increase performance weight from 0.6 to 0.9
-        progress = min(1.0, self.step_counter / 20.0)
-        w_novelty = 0.4 - (0.3 * progress)
-        w_perf = 1.0 - w_novelty
-        
-        for agent_id, result in results_map.items():
-            if not result: continue
-            
-            # 1. Base Performance (0.0 to 1.0)
-            performance_score = min(result.final_mean_reward / 500.0, 1.0)
-            if performance_score < 0: performance_score = 0.0 
-            
-            # 2. Stability Penalty
-            # metrics['std_reward'] comes from SB3ExperimentRunner (if available)
-            # Default to 0 if missing
-            std_reward = result.metrics.get("std_reward", 0.0)
-            # Normalize std: if std is 50 (10% of max), penalty is high.
-            # Let's say we penalize 0.002 per unit of std
-            stability_penalty = min(0.2, std_reward * 0.002)
-            
-            adjusted_perf = max(0.0, performance_score - stability_penalty)
-            
-            # 3. Novelty Bonus
-            novelty_score = self.novelty_calc.calculate_novelty(result.config)
-            
-            # 4. Total Meta-Reward
-            total_reward = (w_perf * adjusted_perf) + (w_novelty * novelty_score)
-            
-            rewards[agent_id] = total_reward
-            self.history.append(result)
-            results_out[agent_id] = result
-            self.novelty_calc.add_to_history(result.config)
-            
-            # Check for best
-            if result.final_mean_reward > self.best_reward:
-                self.best_reward = result.final_mean_reward
-                self.best_config = result.config
-                print(f"!!! New Global Best found by {agent_id}: {self.best_reward:.1f} !!!")
-                
+                        # 5. Time Penalty
+                        time_penalty = 0.01 * result.duration_seconds
+                        final_meta_reward = weighted_score - time_penalty
+                        
+                        rewards[a_id_returned] = final_meta_reward
+                        self.history.append(result)
+                        results_out[a_id_returned] = result
+                        self.novelty_calc.add_to_history(result.config)
+                        
+                        # Check for best
+                        if result.final_mean_reward > self.best_reward:
+                            self.best_reward = result.final_mean_reward
+                            self.best_config = result.config
+                            self.log.info(f"!!! New Global Best found by {a_id_returned}: {self.best_reward:.1f} !!!")
+                            
+                    else:
+                        # Failure returned by worker
+                        self.log.error(f"[Lab] {a_id_returned} FAILED: {error}")
+                        rewards[a_id_returned] = -1.0 # Penalty for failure
+                        results_out[a_id_returned] = None
+                        
+                except Exception as e:
+                    self.log.error(f"[Lab] System Error for {a_id}: {e}")
+                    rewards[a_id] = -1.0
+                    results_out[a_id] = None
+
         return results_out, rewards
 
     def get_observation(self) -> Observation:
@@ -134,10 +155,10 @@ class LabEnvironment(MetaEnvironment):
         # 1. Performance Trends
         trends = {}
         if len(self.history) > 0:
-            reward_vals = [r.final_mean_reward for r in self.history]
-            trends["mean_reward_all"] = float(np.mean(reward_vals))
-            trends["max_reward_all"] = float(np.max(reward_vals))
-            
+            # Assuming 'reward_vals' is derived from self.history somewhere above,
+            # or should be calculated here. For now, assuming it's available.
+            # If not, it needs to be extracted from self.history.
+            reward_vals = [res.final_mean_reward for res in self.history] # Added this line for reward_vals
             # Recent trends (last 10)
             recent = reward_vals[-10:]
             trends["mean_reward_recent"] = float(np.mean(recent))

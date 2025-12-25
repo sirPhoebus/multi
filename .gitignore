@@ -12,3 +12,4 @@ test_log.txt
 test_output.txt
 .gitignore
 failed_papers.txt
+knowledge/*

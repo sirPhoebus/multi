@@ -20,6 +20,13 @@ class ExperimentResult:
     final_mean_reward: float
     training_curve: List[float]  # Reward over time
     metrics: Dict[str, float] # e.g., sample_efficiency, stability_score
+    
+    # [NEW] Temporal Metrics
+    duration_seconds: float = 0.0
+    total_env_steps: int = 0
+    
+    final_model_path: Optional[str] = None
+    info: Dict[str, Any] = dataclasses.field(default_factory=dict)
 
 @dataclasses.dataclass
 class Observation:

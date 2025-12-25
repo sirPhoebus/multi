@@ -19,7 +19,9 @@ class SB3ExperimentRunner:
         """
         try:
             # 1. Create Environment
+            from stable_baselines3.common.monitor import Monitor
             env = gym.make(self.env_id)
+            env = Monitor(env) # Fix: Must wrap for reward logging
             
             # 2. Instantiate Algorithm
             algo_class = self._get_algo_class(config.algorithm)
@@ -27,6 +29,32 @@ class SB3ExperimentRunner:
             # Extract hyperparameters
             hp = config.hyperparameters.copy()
             
+            # [FIX] Batch Size / Buffer / n_steps Validation
+            # If batch_size is larger than rollout buffer (n_steps * n_envs), it fails.
+            if "batch_size" in hp:
+                 if config.algorithm in ["PPO", "A2C"]:
+                     # PPO uses n_steps * n_envs as buffer size
+                     n_steps = hp.get("n_steps", 2048) # Default PPO n_steps
+                     buffer_size = n_steps # Assuming n_envs=1
+                     
+                     if hp["batch_size"] > buffer_size:
+                         # Case 1: Batch too big -> reduce batch
+                         hp["batch_size"] = buffer_size
+                     else:
+                         # Case 2: Batch must be a factor of n_steps (buffer_size)
+                         # If not, we adjust n_steps to be a multiple
+                         bs = hp["batch_size"]
+                         remainder = n_steps % bs
+                         if remainder != 0:
+                             # Round down n_steps to nearest multiple of bs
+                             new_n_steps = max(bs, n_steps - remainder)
+                             hp["n_steps"] = new_n_steps
+                             # print(f"[SB3Runner] Adjusted n_steps {n_steps} -> {new_n_steps} to be multiple of batch_size {bs}")
+                         
+                 elif config.algorithm in ["DQN", "SAC"]:
+                     # Off-policy uses explicit buffer_size
+                     pass
+
             # Parse Policy Kwargs (Architecture & Activation)
             policy_kwargs = {}
             if "net_arch" in hp:
@@ -50,7 +78,7 @@ class SB3ExperimentRunner:
             
             # On-Policy Params (PPO, A2C)
             if config.algorithm in ["PPO", "A2C"]:
-                for key in ["gae_lambda", "ent_coef", "vf_coef", "max_grad_norm", "n_steps"]:
+                for key in ["gae_lambda", "ent_coef", "vf_coef", "max_grad_norm", "n_steps", "batch_size"]:
                     if key in hp: algo_kwargs[key] = hp.pop(key)
                     
             # Off-Policy Params (DQN, SAC)
@@ -66,12 +94,16 @@ class SB3ExperimentRunner:
             elif config.algorithm == "DQN":
                 for key in ["target_update_interval", "exploration_fraction", "exploration_final_eps"]:
                     if key in hp: algo_kwargs[key] = hp.pop(key)
+                
+                # Guard: DQN only supports Discrete action spaces
+                if not isinstance(env.action_space, gym.spaces.Discrete):
+                     raise ValueError(f"DQN does not support action space {env.action_space}. Use PPO/A2C/SAC for Continuous environments.")
             
             elif config.algorithm == "SAC":
                 # Guard: SAC only supports Box (Continuous) action spaces
-                import gymnasium
-                if not isinstance(env.action_space, gymnasium.spaces.Box):
+                if not isinstance(env.action_space, gym.spaces.Box):
                     raise ValueError(f"SAC does not support action space {env.action_space}. Use PPO/DQN/A2C for Discrete environments.")
+                
                 if "ent_coef" in hp: algo_kwargs["ent_coef"] = hp.pop("ent_coef")
                 
             # 3. Instantiate Model
@@ -90,14 +122,19 @@ class SB3ExperimentRunner:
             class CurveCallback(BaseCallback):
                 def __init__(self, eval_env, eval_freq=1000):
                     super().__init__(verbose=0)
-                    self.eval_env = eval_env
+                    self.eval_env = Monitor(eval_env) # Fix: Wrap eval env too
                     self.eval_freq = eval_freq
                     self.curve = []
                 def _on_step(self) -> bool:
                     # eval_freq needs to be relative to num_timesteps
                     if self.num_timesteps % self.eval_freq == 0:
-                        m_reward, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=5)
-                        self.curve.append(float(m_reward))
+                        try:
+                            m_reward, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=5, warn=False)
+                            self.curve.append(float(m_reward))
+                        except Exception:
+                            # Sometimes eval fails on Discrete vs Box mismatches if env not reset
+                            pass 
+                    return True
                     return True
             
             eval_env = gym.make(self.env_id)

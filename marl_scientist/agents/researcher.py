@@ -59,26 +59,34 @@ class ResearcherAgent(Researcher):
 
         # 3. Causal Reasoning: Use internal model to improve current config
         # Epsilon-greedy: data gathering vs exploitation
-        if random.random() < 0.2:
+        exploration_rate = 0.3 # Increased from 0.2
+        if random.random() < exploration_rate:
              # Random Exploration (Mutation or totally new random config)
-             if random.random() < 0.5:
+             if random.random() < 0.4:
                  return self._random_config(observation) # Wide exploration
              else:
-                 return self._mutate_config(self.current_best_config, observation) # Local exploration
+                 return self._mutate_config(self.current_best_config, observation) # Local exploration (can switch env)
         else:
             # "Reasoned" proposal
             new_params = self.causal_model.suggest_improvements(self.current_best_config.hyperparameters)
+            
+            # Occasionally switch environment even in reasoned mode to explore new frontiers
+            # This prevents sticking to CartPole forever just because it hit 500
+            env_id = self.current_best_config.env_id
+            if random.random() < 0.15: # 15% chance to try this algo on a new environment
+                 available_envs = list(observation.env_metadata.keys()) if (observation and observation.env_metadata) else ["CartPole-v1"]
+                 env_id = random.choice(available_envs)
+            
             return ExperimentConfig(
                 algorithm=self.current_best_config.algorithm,
                 hyperparameters=new_params,
-                env_id=self.current_best_config.env_id # Keep same env
+                env_id=env_id
             )
             
     def update_knowledge(self, result: ExperimentResult):
         """
         Learn from the result.
         """
-        # Update Causal Model
         # Update Causal Model
         self.causal_model.update_model(
             result.config.hyperparameters, 
@@ -91,8 +99,10 @@ class ResearcherAgent(Researcher):
             self.best_performance = result.final_mean_reward
             self.current_best_config = result.config
             
-            # Publish if it's a significant finding (e.g. > 300)
-            if self.best_performance > 300.0 and self.knowledge_store:
+            # Publish if it's a significant finding
+            # Logic: If it's better than anything we've found before, OR it's a high score.
+            # We remove the hardcoded 300.0 CartPole bias.
+            if self.knowledge_store:
                 paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
                 self.knowledge_store.add_paper(paper)
 

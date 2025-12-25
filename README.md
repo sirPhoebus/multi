@@ -2,28 +2,27 @@
 
 **An Autonomous Multi-Agent RL Research Laboratory**
 
-Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act as **Reinforcement Learning Researchers**. These agents autonomously read literature, maintain causal models of hyperparameter dynamics, and execute parallel experiments to discover optimal RL configurations.
+Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act as **Reinforcement Learning Researchers**. These agents autonomously read literature, maintain causal models of hyperparameter dynamics, and learn to execute parallel experiments through a recurrent neural network "Brain."
 
 ---
 
 ## 🚀 Key Features
 
-### 🧠 Autonomous Researcher Agents
-- **Literature Review (RAG)**: Agents query a local vector database of 100+ research papers to inform their experiment proposals.
-- **Scientific Diversity**: Stochastic intent and probabilistic sampling ensure that agents explore diverse research directions.
-- **Causal Reasoning**: An internal SEM (Structural Equation Model) engine allows agents to learn *why* specific parameters (like entropy coefficients or clipping ranges) impact performance.
-- **Journaling**: High-performing discoveries are "published" back to the shared knowledge journal, enabling social learning.
+### 🧠 Neural "Brain" Architecture (New!)
+- **Sequence-Aware Model**: Researcher Agents use an **LSTM-based RNN** to process the sequence of past experiments (Successes/Failures).
+- **Meta-PPO Training**: The agents' "Scientist Brain" is optimized using Meta-Reinforcement Learning (PPO) based on their success in the meta-environment.
+- **Multimodal State**: Brain inputs combine performance trends, novelty landscapes, and high-dimensional knowledge embeddings.
+
+### 📚 Streaming Knowledge Pipeline
+- **Incremental Ingestion**: A dedicated `knowledge/` folder acts as an inbox for new research summaries or expert opinions.
+- **Auto-Archiving**: New files are automatically embedded via a local LLM and archived to `knowledge/processed/` during runtime, enabling live "learning" while the simulation is running.
+- **LLM-RAG Integration**: Agents query the vector base to inform their neuro-symbolic experiment proposals.
 
 ### 🔬 The Laboratory Environment
 - **Multi-Benchmark Suite**:
     - **Discrete**: `CartPole-v1`, `Acrobot-v1`, `LunarLander-v3`.
     - **Continuous**: `Pendulum-v1` (with full SAC support).
-- **Parallel Execution**: Multi-processing runner achieves significant speedups by executing experiments in isolated subprocesses.
-- **Resource Hardening**: Built-in environment cleanup and compatible-algorithm guarding prevent systemic failures and memory leaks.
-
-### 📈 Adaptive Meta-Reward
-- **Multi-Objective Optimization**: Agents are rewarded for high final return, novelty of approach, and training stability.
-- **Stability Penalty**: Discourages brittle, high-variance hyperparameter configurations.
+- **Parallel Execution**: Multi-processing runner executes experiments in isolated subprocesses for maximum throughput.
 
 ---
 
@@ -31,13 +30,13 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
 
 ```mermaid
 graph TD
-    A[Researcher Agents] -->|Propose Config| B(The Lab)
+    A[Neural Researchers] -->|Propose Config| B(The Lab)
     B -->|Parallel Run| C[SB3 Workers]
     C -->|Results| D[Metrics Engine]
     D -->|Reward + Obs| A
     A -->|Consult| E[Knowledge Store]
-    E <-->|RAG| F[Vector DB]
-    D -->|Journaling| E
+    E <-->|Streaming| F[Knowledge Folder]
+    A -->|Update| G[Meta-PPO Trainer]
 ```
 
 ---
@@ -46,37 +45,33 @@ graph TD
 
 ### Installation
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/meta-rl-scientist.git
-
-# Install dependencies (requires Gymnasium, SB3, Scikit-learn)
+# Install dependencies
 pip install -e .
 ```
 
-### Running the Simulation
+### Running the Neural Scientist
 ```bash
-# Start a multi-agent simulation for 10 meta-steps
-python marl_scientist/main.py --steps 10 --num-agents 4
+# Start a neural-agent simulation for 10 meta-steps
+python marl_scientist/main.py --agent-type neural --num-agents 2 --steps 10
 ```
 
-### Monitoring
-- **Logs**: Detailed tracebacks and experiment statuses are written to `simulation.log`.
-- **Knowledge**: Scientific papers and discovered configurations are persisted in `kb_embeddings.pkl`.
+### Adding New Knowledge
+Simply drop `.txt` or `.md` files into the `knowledge/` directory. The simulation will pick them up, embed them, and move them to `knowledge/processed/` automatically.
 
 ---
 
 ## 🛠️ Requirements
 - **Gymnasium** + `stable-baselines3`
+- **PyTorch** (for the Neural Brain)
 - **LM Studio** / **Local LLM**: (Defaulting to `glm-4v-flash` and `nomic-embed`)
-- **Python 3.10+**
 
 ---
 
 ## 🗺️ Roadmap
 - [x] Multi-Process Parallelization
-- [x] RAG-Informed Research Strategy
+- [x] RNN-based Neural "Brain" (Meta-RL)
+- [x] Streaming Knowledge Ingestion (Archiving)
 - [x] Continuous Action Space Support
-- [x] Causal Discovery Integration
-- [ ] Multi-Agent Competitive Meta-Training
+- [ ] Multi-Agent Competitive Meta-Training (Self-Play Research)
 - [ ] Vision-based Atari Benchmarks
-- [ ] Dynamic Loss Function Synthesis
+- [ ] Dynamic Neural Architecture Synthesis

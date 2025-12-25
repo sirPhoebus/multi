@@ -87,7 +87,8 @@ class CausalDiscoveryEngine:
         # If Effect > 0, we want to INCREASE the parameter
         # If Effect < 0, we want to DECREASE the parameter
         
-        print(f"  [Causal Inference] Estimated Effects: {effects}")
+        clean_effects = {k: round(float(v), 3) for k, v in effects.items()}
+        print(f"  [Causal Inference] Estimated Effects: {clean_effects}")
         
         for hp, effect in effects.items():
             if abs(effect) < 0.05: continue # Ignore negligible effects

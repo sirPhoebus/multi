@@ -11,6 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="Meta-RL Scientist Main Loop")
     parser.add_argument("--steps", type=int, default=5, help="Number of meta-steps to run")
     parser.add_argument("--num-agents", type=int, default=2, help="Number of agents to simulate")
+    parser.add_argument("--agent-type", type=str, default="heuristic", choices=["heuristic", "neural"], help="Type of researcher agent")
     args = parser.parse_args()
     
     # Setup Logger
@@ -24,14 +25,26 @@ def main():
     # [NEW] Real Knowledge Base integration
     from marl_scientist.knowledge.real_store import RealKnowledgeStore
     kb = RealKnowledgeStore()
-    kb.ingest_references("marl_scientist/ref.md") # Ingest ~100 papers
+    
+    # Initial scan of existing files
+    kb.ingest_folder("knowledge/") 
+    
+    # [NEW] Start Async Watcher
+    from marl_scientist.knowledge.watcher import KnowledgeWatcher
+    watcher = KnowledgeWatcher(watch_dir="knowledge/")
+    watcher.start()
     
     # 2. Setup Agents
-    # Dynamic creation
-    agents = [
-        ResearcherAgent(agent_id=f"Agent_{i+1}")
-        for i in range(args.num_agents)
-    ]
+    from marl_scientist.agents.neural_researcher import NeuralResearcherAgent
+    
+    agents = []
+    for i in range(args.num_agents):
+        agent_id = f"Agent_{i+1}"
+        if args.agent_type == "neural":
+            agent = NeuralResearcherAgent(agent_id=agent_id)
+        else:
+            agent = ResearcherAgent(agent_id=agent_id)
+        agents.append(agent)
     
     # [NEW] Load previous state if available
     for agent in agents:
@@ -56,6 +69,12 @@ def main():
             
             # 1. Observation
             obs = lab.get_observation()
+            
+            # [NEW] Process any new knowledge files detected by the watcher
+            new_files = watcher.get_new_files()
+            if new_files:
+                log.info(f"[KnowledgeWatcher] Detected {len(new_files)} new files. Processing...")
+                kb.process_file_queue(new_files)
             
             # 2. Agent Action
             actions = {}
@@ -105,6 +124,10 @@ def main():
         # Save on interrupt
         for agent in agents:
             agent.save(f"saves/{agent.agent_id}.pkl")
+        
+    finally:
+        # Stop watcher
+        watcher.stop()
         
     # Save on completion
     for agent in agents:

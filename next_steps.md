@@ -1,58 +1,28 @@
-### __Critical Gaps & Improvement Areas__
+#### __1. The Neural "Brain" (DONE)__
 
-#### __1. The "Meta-RL" Aspect is Currently Missing__
+- __Status__: Implemented `MetaBrain` (RNN-based) and `NeuralResearcherAgent`.
+- __Mechanism__: Agents use an LSTM history encoder, MLP trend encoder, and Linear knowledge encoder to propose experiments.
+- __Learning__: Trained via Meta-PPO in `trainer.py`.
 
-- __Current State__: Agents use simple random mutation (epsilon-greedy), not actual reinforcement learning.
-- __Required Improvement__: Implement proper meta-RL where agents learn to propose better experiments over time. The `ResearcherAgent` should be an RNN policy trained via PPO/A2C on the meta-environment rewards.
+#### __2. Action Space Expansion (DONE)__
 
-#### __2. Action Space Limitations__
+- __Status__: Agents now control PPO, A2C, DQN, and SAC.
+- __Parameters__: Continuous control over Learning Rate, Gamma, Entropy, GAE, Batch Size, and n_steps.
 
-- __Current State__: Only 3 hyperparameters (`learning_rate`, `gamma`, `ent_coef`) for a single algorithm.
+#### __3. Observation Space (DONE)__
 
-- __Required Improvement__: Expand to:
+- __Status__: Brain consumes performance trends, novelty landscape, and 768-dim knowledge embeddings.
 
-  - Multiple algorithms (PPO, A2C, DQN, SAC)
-  - Architectural choices (network layers, activation functions)
-  - Loss function modifications
-  - Exploration strategy parameters
+#### __4. Missing Meta-Training Loop (DONE)__
 
-#### __3. Observation Space is Information-Poor__
+- __Status__: `marl_scientist/agents/trainer.py` provides the PPO loop for the researcher brain.
 
-- __Current State__: Only raw experiment history.
+#### __5. Benchmark Diversity (IN PROGRESS)__
 
-- __Required Improvement__: Include:
+- __Current State__: Supported: CartPole-v1, Acrobot-v1, Pendulum-v1, LunarLander-v3.
+- __Required Improvement__: Add Atari or Procgen for more complex visual tasks.
 
-  - Causal graph embeddings
-  - Performance trends (derivatives)
-  - Novelty landscape features
-  - Knowledge base summaries
+#### __6. Causal Discovery (NEXT)__
 
-#### __4. Causal Discovery is Stubbed__
-
-- __Current State__: Empty `CausalGraph` class.
-- __Required Improvement__: Implement causal inference (e.g., PC algorithm, neural causal models) to learn relationships like `ent_coef → exploration → final_reward`.
-
-#### __5. Knowledge Integration (DONE)__
-
-- __Status__: Implemented RAG workflow with `RealKnowledgeStore`.
-- __Mechanism__: Agents query KB, LLM translates papers to JSON configs.
-
-#### __6. Parallelization & Efficiency (DONE)__
-
-- __Status__: Implemented `ProcessPoolExecutor` in `LabEnvironment`.
-- __Performance__: Experiments run concurrently on available cores.
-
-#### __7. Reward Function Design (DONE)__
-
-- __Status__: Implemented Adaptive Meta-Reward.
-- __Mechanism__: Weights shift from Novelty to Performance; Stability penalty included.
-
-#### __8. Missing Meta-Training Loop__
-
-- __Current State__: Main loop runs fixed steps without updating agent policies.
-- __Required Improvement__: Implement outer-loop optimization that updates researcher agents based on cumulative meta-rewards.
-
-#### __9. Benchmark Diversity__
-
-- __Current State__: Only CartPole-v1.
-- __Required Improvement__: Add benchmark suites (Classic Control, Atari, MuJoCo) to test generalization.
+- __Status__: `CausalGraph` exists but remains heuristic.
+- __Goal__: Integrate Neural Causal Discovery to refine the Brain's reasoning.
