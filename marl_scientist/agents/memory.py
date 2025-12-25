@@ -3,6 +3,35 @@ import os
 import numpy as np
 from typing import Dict, List, Any, Optional
 from marl_scientist.core import ExperimentResult, ExperimentConfig
+from marl_scientist.knowledge.trajectory_store import TrajectoryStore
+
+class TrajectoryMemory:
+    """
+    Interface for Trajectory Vector Storage.
+    Wraps the TrajectoryStore to provide agent-specific or global access.
+    """
+    def __init__(self, persistence_path: str = "trajectories.pkl"):
+        self.store = TrajectoryStore(persistence_path=persistence_path)
+
+    def add(self, result: ExperimentResult):
+        self.store.add_trajectory(result)
+
+    def get_failures(self, config: ExperimentConfig, k: int = 3) -> List[str]:
+        """
+        Retrieves summaries of similar experiments that failed.
+        """
+        hits = self.store.search_similar(config, k=k*2) # Get more to filter
+        failures = [h["summary"] for h in hits if not h["outcome"]["success"]]
+        return failures[:k]
+
+    def check_similarity(self, config: ExperimentConfig, threshold: float = 0.95) -> Optional[Dict[str, Any]]:
+        """
+        Check if a proposed config is too similar to a past one.
+        """
+        hits = self.store.search_similar(config, k=1)
+        if hits and hits[0]["score"] > threshold:
+            return hits[0]
+        return None
 
 class EpisodicMemory:
     """

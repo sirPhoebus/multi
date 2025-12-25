@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
 import numpy as np
+import math
 from typing import Dict, List, Any, Optional, Tuple
 
 class MetaBrain(nn.Module):
@@ -18,7 +19,8 @@ class MetaBrain(nn.Module):
         hidden_dim: int = 256,
         num_algos: int = 4,
         num_envs: int = 8,
-        num_continuous_hps: int = 6
+        num_continuous_hps: int = 6,
+        latent_dim: int = 768    # [PHASE 3] Trajectory embeddings
     ):
         super().__init__()
         
@@ -39,9 +41,16 @@ class MetaBrain(nn.Module):
             nn.Linear(128, hidden_dim)
         )
         
+        # 3.5 Latent Encoder [PHASE 3]
+        self.latent_mlp = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, hidden_dim)
+        )
+        
         # 4. Fusion & Decision Core
-        # Trends (hidden_dim) + Knowledge (hidden_dim) + RNN (hidden_dim) + [NEW] MemoryContext (6) + [NEW] Preference (3)
-        self.obs_dim = hidden_dim * 3 + 6 + 3 
+        # Trends (hidden_dim) + Knowledge (hidden_dim) + RNN (hidden_dim) + Latent (hidden_dim) + [NEW] MemoryContext (6) + [NEW] Preference (3)
+        self.obs_dim = hidden_dim * 4 + 6 + 3 
         
         self.fusion = nn.Linear(self.obs_dim, hidden_dim)
         self.decision_rnn = nn.GRUCell(hidden_dim, hidden_dim) 
@@ -70,6 +79,7 @@ class MetaBrain(nn.Module):
         history_seq: torch.Tensor,     # (batch, seq_len, history_dim)
         trends: torch.Tensor,          # (batch, trend_dim)
         knowledge: torch.Tensor,       # (batch, knowledge_dim)
+        latent_context: torch.Tensor = None, # [PHASE 3] (batch, latent_dim)
         memory_context: torch.Tensor = None, # (batch, 6)
         preference_vec: torch.Tensor = None, # [NEW] (batch, 3) -> [Perf, Efficiency, Stability]
         hidden_state: torch.Tensor = None,
@@ -88,6 +98,11 @@ class MetaBrain(nn.Module):
         h_trends = self.trends_mlp(trends)
         h_know = self.knowledge_mlp(knowledge)
         
+        if latent_context is None:
+             h_latent = torch.zeros(batch_size, self.latent_mlp[-1].out_features, device=trends.device)
+        else:
+             h_latent = self.latent_mlp(latent_context)
+        
         # Handle Missing Contexts
         if memory_context is None:
             memory_context = torch.zeros(batch_size, 6, device=trends.device)
@@ -95,7 +110,7 @@ class MetaBrain(nn.Module):
             preference_vec = torch.tensor([[0.5, 0.25, 0.25]], device=trends.device).repeat(batch_size, 1)
         
         # Fusion
-        combined = torch.cat([h_hist, h_trends, h_know, memory_context, preference_vec], dim=-1)
+        combined = torch.cat([h_hist, h_trends, h_know, h_latent, memory_context, preference_vec], dim=-1)
         latent = F.relu(self.fusion(combined))
         
         # Session state update
@@ -136,14 +151,14 @@ class BrainEncoder:
         "MountainCarContinuous-v0", "Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"
     ]
     
-    def __init__(self, history_len: int = 10):
+    def __init__(self, history_len: int = 5):
         self.history_len = history_len
-
     def encode_observation(
-        self, 
+        self,
         observation: Any, 
         agent_id: str, 
-        knowledge_vec: Optional[np.ndarray] = None
+        knowledge_vec: Optional[np.ndarray] = None,
+        latent_vec: Optional[np.ndarray] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Converts the rich Observation object into fixed-size tensors.
@@ -217,10 +232,15 @@ class BrainEncoder:
         if knowledge_vec is None:
             knowledge_vec = np.zeros(768)
             
+        # 4. Latent Context (768) [PHASE 3]
+        if latent_vec is None:
+            latent_vec = np.zeros(768)
+            
         return {
             "history": torch.tensor(np.array(hist_seq), dtype=torch.float32).unsqueeze(0),
             "trends": torch.tensor(trends_vec, dtype=torch.float32).unsqueeze(0),
-            "knowledge": torch.tensor(knowledge_vec, dtype=torch.float32).unsqueeze(0)
+            "knowledge": torch.tensor(knowledge_vec, dtype=torch.float32).unsqueeze(0),
+            "latent": torch.tensor(latent_vec, dtype=torch.float32).unsqueeze(0)
         }
 
     def decode_action(self, algo_idx: int, env_idx: int, hp_vals: np.ndarray) -> Dict[str, Any]:
@@ -237,25 +257,31 @@ class BrainEncoder:
             else:
                 return (val + 1) / 2 * (max_val - min_val) + min_val
 
+        def snap_to_pow2(val):
+            return 2**int(round(math.log2(val)))
+
         hps = {
             "learning_rate": float(scale(hp_vals[0], 1e-5, 1e-2, log=True)),
             "gamma": float(scale(hp_vals[1], 0.8, 0.9999)),
             "ent_coef": float(scale(hp_vals[2], 0.0, 0.1)),
             "gae_lambda": float(scale(hp_vals[3], 0.8, 1.0)),
-            "total_timesteps": 30000 # Increased for realistic exams
+            "total_timesteps": 30000 
         }
         
         # Add algo-specific defaults/scaling
         if algo == "PPO":
             hps["n_steps"] = int(scale(hp_vals[4], 128, 2048))
-            hps["batch_size"] = int(scale(hp_vals[5], 32, 512))
+            bs = int(scale(hp_vals[5], 32, 512))
+            hps["batch_size"] = snap_to_pow2(bs)
         elif algo == "DQN":
-            hps["batch_size"] = int(scale(hp_vals[4], 32, 256))
+            bs = int(scale(hp_vals[4], 32, 256))
+            hps["batch_size"] = snap_to_pow2(bs)
             hps["learning_starts"] = int(scale(hp_vals[5], 100, 5000))
         elif algo == "SAC":
-             hps["gradient_steps"] = 1 # Force 1 update per step for speed
+             hps["gradient_steps"] = 1 
              hps["tau"] = float(scale(hp_vals[5], 0.005, 0.05))
-             hps["batch_size"] = int(scale(hp_vals[4], 64, 256)) # Reuse hp[4] since grad_steps removed
-             hps["total_timesteps"] = 30000 # Realistic duration
+             bs = int(scale(hp_vals[4], 64, 256))
+             hps["batch_size"] = snap_to_pow2(bs)
+             hps["total_timesteps"] = 30000 
         
         return {"algorithm": algo, "env_id": env, "hyperparameters": hps}

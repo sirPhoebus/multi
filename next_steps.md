@@ -1,65 +1,102 @@
-Directives to Move Forward — Upgrading Our Brain
+## __Areas for Improvement & Upgrades__
 
-<findings>
-The D3 Engine ("Deterministic-Deontic-Dynamic") is a neuro-symbolic runtime that strictly separates:
+### __1. Architecture & Code Quality__
 
-Probabilistic generation (neural/LLM components — creative proposal, hypothesis generation)
-Deterministic state (symbolic layer — verification, de-duplication, safety enforcement)
+- __Issue__: Mix of synchronous and asynchronous patterns; `main.py` is monolithic (500+ lines) with complex state management.
 
-Key innovations that directly address our swarm's current limitations:
+- __Improvements__:
 
-Active Workspace vs Latent History
-Only a tiny "active" context (volatile workspace) is kept in-token.
-Everything else is compressed into Trajectory Vectors (high-dimensional embeddings of past states/decisions) stored in a vector DB.
-This claims 99% compute reduction vs naive long-context LLMs — perfect for our agents that are starting to accumulate thousands of experiment histories.
+  - Refactor `main.py` into a dedicated `Simulation` class with clear state transitions.
+  - Use asyncio throughout for cleaner async I/O (knowledge ingestion, LLM calls).
+  - Implement proper dependency injection (e.g., pass lab, knowledge store, validator to agents).
+  - Add type hints consistently (currently partial) and enforce with mypy.
 
-Vector-Space De-duplication & Negative Knowledge Propagation
-Failed trajectories are embedded and globally de-duplicated → the entire swarm instantly "learns" a failure mode without re-experiencing it.
-This is huge for us: right now laggards harvest weights, but winners still occasionally repeat known-bad hyperparams.
+### __2. MetaBrain Training & Stability__
 
-Hierarchical Verification Stack
-Multiple symbolic layers check proposals for validity before execution (e.g., type safety, resource bounds, causal consistency).
-Prevents invalid experiments from ever hitting the lab — aligns perfectly with our need for safer self-modification.
+- __Issue__: The `trainer.py` implements on-policy PPO but is not integrated into the main loop. The brain is currently static (no online learning).
 
-Horizon Mode (from the companion paper)
-Instead of single-agent long-chain reasoning, spawn a swarm of 10,000 lightweight agents exploring in parallel, then consolidate via "Flash-Gated Consensus".
-Designed for open-ended engineering (exactly what our meta-scientists are doing).
+- __Improvements__:
 
-Safety & Entropy Routing
-Tasks are routed based on entropy: high-uncertainty → neural exploration; low-uncertainty → symbolic execution.
-Built-in red-teaming and verification loops.
-</findings>
+  - Integrate online meta-training: after every N experiments, update the brain via PPO using collected trajectories.
+  - Implement a replay buffer for off-policy updates (SAC-style) to improve sample efficiency.
+  - Add gradient clipping, learning rate scheduling, and more sophisticated advantage estimation (GAE).
+  - Consider transformer-based architecture for longer history contexts.
 
-Let's integrate D3 concepts incrementally without throwing away our working swarm. Here's a phased plan:
-Phase 1: Immediate Low-Effort Wins (Next Commit)
+### __3. Knowledge System Robustness__
 
-Trajectory Vector Compression
-Embed each completed experiment summary (config + outcome + time) into a fixed vector (use nomic-embed-text-v1.5 we already have). Store in our Chroma vector store with metadata (reward, time, success/fail).
-Before proposing new experiments, retrieve top-k similar past trajectories → explicitly inject "negative knowledge" into the prompt ("Avoid these failed configs: ...").
-Basic De-duplication
-When an agent proposes a hyperparam set, compute its embedding and check cosine similarity > 0.95 against past experiments → reject if too similar and worse outcome.
+- __Issue__: Embedding cache mechanism is complex and may have bugs (see `real_store.py` line 100-150). LLM calls are synchronous and could block.
 
-Phase 2: Symbolic Verification Layer (1-2 Days)
+- __Improvements__:
 
-Add a lightweight symbolic checker before dispatching to lab:
-Validate hyperparams in sane ranges (e.g., lr between 1e-6 and 1e-1, batch_size power of 2, etc.)
-Resource budgeting: estimate wall-time based on env + steps + parallel runners, reject if over agent's time budget.
-Use simple Python asserts or even a tiny DSL for rules.
+  - Switch to a dedicated vector database (Chroma, Qdrant) for scalable similarity search and better persistence.
+  - Implement streaming embeddings with batch processing and background threads.
+  - Add citation graph linking papers to experiments, enabling causal reasoning.
 
+### __4. Experiment Execution & Resource Management__
 
-Phase 3: Active/Latent Split in Agent Brain (Major Upgrade)
+- __Issue__: The lab uses `ProcessPoolExecutor` but doesn't handle GPU contention or memory leaks. SB3 runners may not clean up properly.
 
-Refactor agent history:
-Active: last N experiments + current strategic intent.
-Latent: everything else queried via vector retrieval.
+- __Improvements__:
 
-Modify the LSTM brain input to concatenate retrieved trajectory vectors (projected to hidden size) with the sequence.
+  - Add resource limits (CPU cores per experiment, GPU memory fraction).
+  - Implement experiment timeouts and checkpointing (save intermediate models).
+  - Use Docker or subprocess isolation for extreme safety (optional).
 
-Phase 4: Horizon Mode Lite
+### __5. Evaluation & Metrics__
 
-When an agent enters "EXPLORE" with high uncertainty (e.g., new unlocked env), spawn 5-10 lightweight sub-agents with varied temperature/profiles, run short cheap simulations or dry-runs, then consensus-vote on the best proposal.
+- __Issue__: Meta-reward calculation is heuristic; novelty metric is simplistic.
 
-Phase 5: Full Safety Stack
+- __Improvements__:
 
-Implement Flash-Gated Consensus for critical actions (self-modification attempts).
-Add a global "red-team" agent that periodically challenges high-reward proposals.
+  - Learn a reward model (via inverse reinforcement learning) from human preferences or benchmark scores.
+  - Add more sophisticated metrics: exploration entropy, transfer performance, generalization score.
+  - Implement automated statistical testing (A/B testing) to validate improvements.
+
+### __6. Scalability & Distributed Execution__
+
+- __Issue__: The system is single-node; scaling beyond ~8 agents is limited by CPU cores.
+
+- __Improvements__:
+
+  - Decouple agents and lab via message queue (Redis, RabbitMQ) for distributed multi-node execution.
+  - Implement agent "cloning" and "pruning" to dynamically adjust population size.
+  - Add remote experiment execution (e.g., Kubernetes jobs) for large-scale runs.
+
+### __7. Dashboard & Visualization__
+
+- __Issue__: Basic dashboard (HTML/JS) shows leaderboard but lacks real-time plots and drill-down.
+
+- __Improvements__:
+
+  - Integrate a modern web framework (FastAPI + Websockets) for live updates.
+  - Add interactive visualizations of the causal graph, hyperparameter space, and reward landscapes.
+  - Include paper summaries and agent "thought processes" (attention maps).
+
+### __8. Testing & Reliability__
+
+- __Issue__: Unit tests exist but don't cover integration scenarios; no CI/CD pipeline.
+
+- __Improvements__:
+
+  - Expand test suite with integration tests (simulate full loop with mocked LLM).
+  - Add property-based testing for hyperparameter generation.
+  - Set up GitHub Actions for automated testing and linting (black, flake8, mypy).
+
+### __9. LLM Integration & Cost__
+
+- __Issue__: Uses a local LLM client but may be slow; no fallback for API failures.
+
+- __Improvements__:
+
+  - Implement caching for LLM responses (similar to embeddings).
+  - Add support for multiple LLM backends (OpenAI, Anthropic, local Ollama) with fallback.
+  - Use smaller models for simple tasks (e.g., hyperparameter extraction) and larger ones for complex reasoning.
+
+### __10. Roadmap Alignment__
+
+- __Issue__: The roadmap lists "Active/Latent Agent Brain Split (D3 Engine Phase 3)" as pending.
+
+- __Improvements__:
+
+  - Implement the latent/active split: latent memory for long-term storage, active for working context.
+  - Add dynamic neural architecture search (NAS) for the brain itself—agents can evolve their own architectures.

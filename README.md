@@ -38,6 +38,15 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
     - **Fast-Efficient**: Prioritizes speed and sample efficiency.
     - **Stable-Reliable**: Prioritizes consistency and low variance.
 - **Multi-Objective Rewards**: Laboratory evaluation incorporates Performance, Stability, Efficiency, and Novelty into a single weighted meta-reward.
+41: 
+42: ### 🛡️ D3 Engine Integration (Neuro-Symbolic)
+43: - **Trajectory Vector Compression**: Summarizes and embeds past experiments into a fixed vector space, providing the swarm with "Negative Knowledge" to avoid past failures.
+44: - **Symbolic Verification Layer**: A deterministic guard that validates hyperparameters and estimates resource budgets before execution, ensuring safety and efficiency.
+
+### 🛡️ D3 Engine Integration (Neuro-Symbolic)
+- **Trajectory Vector Compression**: Summarizes and embeds past experiments into a fixed vector space, providing the swarm with "Negative Knowledge" to avoid past failures.
+- **Symbolic Verification Layer**: A deterministic guard that validates hyperparameters and estimates resource budgets before execution, ensuring safety and efficiency.
+- **Latent vs. Active Memory**: Long-term history is relegated to the vector store (Latent), while the agent's immediate context remains focused on the current frontier (Active).
 
 ---
 
@@ -45,15 +54,17 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
 
 ```mermaid
 graph TD
-    A[Neural Researchers] -->|Propose| B(The Lab)
+    A[Neural Researchers] -->|Propose| G(Symbolic Guard)
+    G -->|Validate| B(The Lab)
+    G -->|Reject & Correct| A
     B -->|Check Tier| B1{Allowed?}
     B1 -->|Yes| C[SB3 Workers]
     B1 -->|No| A[Penalty]
     C -->|Results| D[Metrics Engine]
     D -->|Reward| A
-    D -->|Check Promotion| B
+    D -->|Trajectory| F[Trajectory Store]
     A -->|Consult| E[Knowledge Store]
-    A <-->|Recall| F[Episodic Memory]
+    A <-->|Recall| F
 ```
 
 ---
@@ -86,11 +97,8 @@ Drop `.txt` or `.md` files into `knowledge/`. The **Async Watcher** will instant
 - [x] Long-Term Episodic Memory
 - [x] Hierarchical Decision-Making
 - [x] Multi-Task Learning Scenarios
-- [ ] Multi-Agent Competitive Meta-Training (Self-Play)
-- [ ] Self-supervised learning objectives for Brain Pre-Training
+- [x] Multi-Agent Competitive Meta-Training (Self-Play)
+- [x] Trajectory Vector Compression (D3 Engine Phase 1)
+- [x] Symbolic Verification Layer (D3 Engine Phase 2)
+- [ ] Active/Latent Agent Brain Split (D3 Engine Phase 3)
 - [ ] Dynamic Neural Architecture Synthesis
-
-
-
-
-

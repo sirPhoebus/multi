@@ -274,6 +274,7 @@ class RealKnowledgeStore:
                         "text": self.journal_documents[idx],
                         "metadata": self.journal_metadatas[idx],
                         "distance": 1.0 - score,
+                        "embedding": self.journal_embeddings[idx], # [NEW] Return the vector
                         "source": "journal"
                     })
             return hits
@@ -342,7 +343,7 @@ class RealKnowledgeStore:
         except Exception as e:
             print(f"[KnowledgeStore] Save failed: {e}")
 
-    def suggest_config_from_paper(self, paper_text: str, paper_title: str = "Unknown Paper") -> Dict[str, Any]:
+    def suggest_config_from_paper(self, paper_text: str, paper_title: str = "Unknown Paper", negative_knowledge: str = "") -> Dict[str, Any]:
         """
         Uses LLM to extract a valid RL configuration from a paper summary.
         """
@@ -357,6 +358,7 @@ You are an expert Machine Learning Engineer.
 Read this research paper summary and extract a specific, valid hyperparameter configuration that helps achieve the goals mentioned.
 
 Paper: "{paper_text}"
+{negative_knowledge}
 
 Output a JSON object with this schema:
 {{

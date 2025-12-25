@@ -49,7 +49,7 @@ class Observation:
 class Researcher(Protocol):
     """Interface for a Researcher Agent."""
     
-    def propose_experiment(self, observation: Observation) -> ExperimentConfig:
+    def propose_experiment(self, observation: Observation) -> Union[ExperimentConfig, List[ExperimentConfig]]:
         ...
         
     def update_knowledge(self, result: ExperimentResult):

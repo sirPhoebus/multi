@@ -1,9 +1,10 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from marl_scientist.core import Researcher, Observation, ExperimentConfig, ExperimentResult
 from marl_scientist.agents.brain import MetaBrain, BrainEncoder
-from marl_scientist.agents.memory import EpisodicMemory
+from marl_scientist.agents.memory import EpisodicMemory, TrajectoryMemory
 from marl_scientist.utils.logger import setup_logger
 
 class NeuralResearcherAgent(Researcher):
@@ -40,6 +41,14 @@ class NeuralResearcherAgent(Researcher):
         # Recurrent state
         self.hidden_state = None
         self.knowledge_store = None
+        self.trajectory_memory: Optional[TrajectoryMemory] = None
+        
+        # [PHASE 4] Horizon Mode State
+        self.horizon_active = False
+        self.horizon_buffer: List[ExperimentConfig] = []
+        self.horizon_results: List[ExperimentResult] = []
+        self.horizon_target_idx = 5 # Number of sub-proposals
+        self.validator = None # [PHASE 2]
         
         self.best_performance = -float('inf')
         
@@ -87,16 +96,24 @@ class NeuralResearcherAgent(Researcher):
     def set_knowledge_store(self, store):
         self.knowledge_store = store
 
+    def set_trajectory_memory(self, memory):
+        self.trajectory_memory = memory
+
+    def set_validator(self, validator):
+        self.validator = validator
+
     def propose_experiment(self, observation: Observation) -> ExperimentConfig:
         """
         Queries the Brain to get a new experiment configuration.
         """
         # 1. Literature Review for Embeddings
-        # We query the knowledge store for relevant papers to get context
         knowledge_vec = self._get_knowledge_embedding(observation)
         
-        # 2. Encode Observation
-        inputs = self.encoder.encode_observation(observation, self.agent_id, knowledge_vec)
+        # 2. Latent Retrieval [PHASE 3]
+        latent_vec = self._get_latent_embedding(observation)
+        
+        # 3. Encode Observation
+        inputs = self.encoder.encode_observation(observation, self.agent_id, knowledge_vec, latent_vec)
         
         # 3. Brain Inference
         with torch.no_grad():
@@ -110,6 +127,20 @@ class NeuralResearcherAgent(Researcher):
             if allowed_names:
                 target_env_context = allowed_names[-1] 
                 
+            # [PHASE 4] Horizon Consolidation
+            if self.horizon_results and not self.horizon_active:
+                self.log.info(f"[{self.agent_id}] Selecting best proposal from Horizon results...")
+                best_res = max(self.horizon_results, key=lambda r: r.final_mean_reward)
+                best_config = best_res.config
+                # Remove horizon markers
+                best_config.hyperparameters.pop("is_horizon", None)
+                best_config.hyperparameters.pop("sub_id", None)
+                best_config.hyperparameters.pop("parent_agent", None)
+                self.horizon_results = [] # Reset
+                # We skip the rest of the brain inference and return this "voted" champion
+                return best_config
+
+            # 1. Prepare Inputs
             # Prepare inputs on correct device
             for k, v in inputs.items():
                 inputs[k] = v.to(self.device)
@@ -131,6 +162,7 @@ class NeuralResearcherAgent(Researcher):
                 inputs["history"],
                 inputs["trends"],
                 inputs["knowledge"],
+                inputs["latent"], # [PHASE 3]
                 mem_tensor, 
                 pref_tensor, 
                 self.hidden_state,
@@ -192,11 +224,59 @@ class NeuralResearcherAgent(Researcher):
         # 4. Decode to Config
         config_dict = self.encoder.decode_action(algo_idx, env_idx, hp_vals)
         
-        return ExperimentConfig(
+        config = ExperimentConfig(
             algorithm=config_dict["algorithm"],
             hyperparameters=config_dict["hyperparameters"],
             env_id=config_dict["env_id"]
         )
+        
+        # [PHASE 4] Horizon Mode Trigger
+        # Measure uncertainty via entropy of goal_logits
+        probs = F.softmax(goal_logits, dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1).item()
+        
+        # If we are in EXPLORE mode and entropy is high (> 0.8), trigger Horizon Mode
+        if intent_str == "EXPLORE" and entropy > 0.8 and not self.horizon_active:
+            self.log.info(f"[{self.agent_id}] High Uncertainty (H={entropy:.2f}). Triggering Horizon Mode Lite!")
+            self.horizon_active = True
+            self.horizon_buffer = []
+            
+            # Generate K sub-proposals (stochastic sampling)
+            sub_configs = []
+            for _ in range(self.horizon_target_idx):
+                # Sample again from logits (stochastic)
+                # For simplicity, we just use the existing algo/env and jitter HPs
+                # Real implementation should sample from distribution
+                jittered_hp = hp_vals + np.random.normal(0, 0.1, size=hp_vals.shape)
+                c_dict = self.encoder.decode_action(algo_idx, env_idx, jittered_hp)
+                sub_config = ExperimentConfig(
+                    algorithm=c_dict["algorithm"],
+                    hyperparameters=c_dict["hyperparameters"],
+                    env_id=c_dict["env_id"]
+                )
+                # Mark as horizon for main.py
+                sub_config.hyperparameters["is_horizon"] = True
+                sub_config.hyperparameters["parent_agent"] = self.agent_id
+                sub_configs.append(sub_config)
+            
+            return sub_configs
+
+        # [PHASE 1] Basic De-duplication
+        if self.trajectory_memory:
+            similar = self.trajectory_memory.check_similarity(config)
+            if similar:
+                print(f"[NeuralResearcher {self.agent_id}] Proposal similar to past failure. Warning only.")
+        
+        # [PHASE 2] Self-Correction (Redundant Check)
+        if self.validator:
+            valid, violations = self.validator.validate(config)
+            if not valid:
+                 print(f"[NeuralResearcher {self.agent_id}] Brain proposed invalid config: {violations}. Forcing re-roll.")
+                 # In a perfect world we would re-run the brain with a penalty, 
+                 # but for now we just log it and let main.py handle the rejection loop.
+                 # The snapping in BrainEncoder should prevent this anyway.
+
+        return config
 
     def update_knowledge(self, result: ExperimentResult):
         """
@@ -204,10 +284,25 @@ class NeuralResearcherAgent(Researcher):
         it learns via the PPO meta-training loop.
         However, it can still publish results to the journal.
         """
+        # [PHASE 4] Handle Horizon Results
+        if result.config.hyperparameters.get("is_horizon"):
+            self.horizon_results.append(result)
+            if len(self.horizon_results) >= self.horizon_target_idx:
+                self.log.info(f"[{self.agent_id}] Horizon Mode Complete. Consolidating {len(self.horizon_results)} sub-results.")
+                # We don't return anything here, but the NEXT propose_experiment will use these
+                # Actually, we could select the best one here and store it.
+                self.horizon_active = False
+            return # Don't update main weights with dry-runs? 
+                   # Or maybe we DO but with lower weighting. For now, skip.
+
         self.best_performance = max(self.best_performance, result.final_mean_reward)
         
         # [NEW] Episodic Memory Update
         self.memory.add(result)
+        
+        # [PHASE 1] Trajectory Compression
+        if self.trajectory_memory:
+            self.trajectory_memory.add(result)
         
         if self.knowledge_store and result.final_mean_reward > 400.0:
             paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
@@ -229,31 +324,32 @@ class NeuralResearcherAgent(Researcher):
         """
         Fetches the top paper embedding from the knowledge store.
         """
-        if not self.knowledge_store:
-            return np.zeros(768)
-            
         # Formulate a simple query based on current trends
         query = "State of the art reinforcement learning hyperparameters stability"
         results = self.knowledge_store.search(query, k=1)
         
         if results:
-            # We need to get the actual embedding. 
-            # In KnowledgeShard/RealStore, the search returns metadata but not the vector.
-            # However, we can re-embed the text or the store could return it.
-            # For now, let's assume the store has a way to get the embedding of the hit.
-            # RealKnowledgeStore has self.embeddings.
-            
-            # Since we are using LLMClient, we can just re-embed the top hit's text 
-            # (cached in LLM if needed, otherwise small cost)
-            hit_text = results[0]["text"]
-            try:
-                # Accessing LLMClient via parent_store or shard
-                client = getattr(self.knowledge_store, "client", None)
-                if client:
-                    return client.get_embedding(hit_text)
-            except:
-                pass
+            return results[0].get("embedding", np.zeros(768)) # Search returns dicts now
+        return np.zeros(768)
+
+    def _get_latent_embedding(self, observation: Observation) -> np.ndarray:
+        """
+        Retrieves similar past trajectory embeddings from the latent store. [PHASE 3]
+        """
+        if not self.trajectory_memory:
+            return np.zeros(768)
         
+        # Use the latest experiment config as a query, if any
+        if observation.experiment_history:
+            last_res = observation.experiment_history[-1]
+            # Fetch similar trajectories WITH embeddings
+            results = self.trajectory_memory.store.search_similar(last_res.config, k=3, return_embeddings=True)
+            
+            if results:
+                # Average the embeddings of the top k hits
+                embs = [r["embedding"] for r in results]
+                return np.mean(embs, axis=0)
+                
         return np.zeros(768)
 
     def save(self, filepath: str):

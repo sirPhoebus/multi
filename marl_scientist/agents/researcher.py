@@ -28,10 +28,17 @@ class ResearcherAgent(Researcher):
         self.best_performance = -float('inf')
         self.causal_model = CausalDiscoveryEngine()
         self.knowledge_store = None # Injected later
-        self.knowledge_store = None # Injected later
+        self.trajectory_memory = None # Injected later
+        self.validator = None # [PHASE 2]
         
     def set_knowledge_store(self, store):
         self.knowledge_store = store
+    
+    def set_trajectory_memory(self, memory):
+        self.trajectory_memory = memory
+
+    def set_validator(self, validator):
+        self.validator = validator
         
     def propose_experiment(self, observation: Observation) -> ExperimentConfig:
         """
@@ -77,11 +84,29 @@ class ResearcherAgent(Researcher):
                  available_envs = list(observation.env_metadata.keys()) if (observation and observation.env_metadata) else ["CartPole-v1"]
                  env_id = random.choice(available_envs)
             
-            return ExperimentConfig(
+            
+            proposal = ExperimentConfig(
                 algorithm=self.current_best_config.algorithm,
                 hyperparameters=new_params,
                 env_id=env_id
             )
+            
+            # [PHASE 2] Self-Correction via Validator
+            if self.validator:
+                valid, violations = self.validator.validate(proposal)
+                if not valid:
+                    # If invalid, mutate it again or try random as fallback
+                    # print(f"[Agent {self.agent_id}] Symbolic violation found: {violations}. Self-correcting...")
+                    return self._mutate_config(proposal, observation)
+
+            # [PHASE 1] Basic De-duplication
+            if self.trajectory_memory:
+                similar = self.trajectory_memory.check_similarity(proposal, threshold=0.96)
+                if similar and not similar["outcome"]["success"]:
+                    # print(f"[Agent {self.agent_id}] Proposal rejected (Too similar to failure). Mutating...")
+                    return self._mutate_config(proposal, observation)
+            
+            return proposal
             
     def update_knowledge(self, result: ExperimentResult):
         """
@@ -93,6 +118,10 @@ class ResearcherAgent(Researcher):
             result.metrics, 
             result.final_mean_reward
         )
+        
+        # [PHASE 1] Trajectory Compression
+        if self.trajectory_memory:
+            self.trajectory_memory.add(result)
         
         # Update Best Known
         if result.final_mean_reward > self.best_performance:
@@ -131,9 +160,16 @@ class ResearcherAgent(Researcher):
         flavor = random.choice(["", "SOTA", "robust", "optimization", "parameters"])
         if flavor: query += f" {flavor}"
         
-        # 2. Search (Local + Journal)
+        # 2. Search (Local + Journal + [PHASE 1] Negative Knowledge)
         # We increase k to get more diversity
         results = self.knowledge_store.search(query, k=5)
+        
+        negative_context = ""
+        if self.trajectory_memory:
+             # Look for similar failures to avoid
+             failures = self.trajectory_memory.get_failures(self.current_best_config, k=2)
+             if failures:
+                 negative_context = "\nAvoid these past failure modes:\n" + "\n".join([f"- {f}" for f in failures])
         
         if not results: return None
         
@@ -162,7 +198,11 @@ class ResearcherAgent(Researcher):
             parent = getattr(self.knowledge_store, "parent_store", self.knowledge_store)
             
             # Synthesize
-            llm_config_dict = parent.suggest_config_from_paper(text, paper_title=meta.get('title', 'Unknown'))
+            llm_config_dict = parent.suggest_config_from_paper(
+                text, 
+                paper_title=meta.get('title', 'Unknown'),
+                negative_knowledge=negative_context
+            )
             
             if llm_config_dict:
                 # Merge with our defaults to ensure validity (e.g. if LLM missed net_arch)

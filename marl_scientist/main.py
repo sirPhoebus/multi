@@ -11,6 +11,8 @@ from marl_scientist.utils.plotter import plot_training_curves
 from marl_scientist.utils.logger import setup_logger
 from marl_scientist.knowledge.real_store import RealKnowledgeStore
 from marl_scientist.knowledge.watcher import KnowledgeWatcher
+from marl_scientist.agents.memory import TrajectoryMemory
+from marl_scientist.safeguards.symbolic_checker import SymbolicValidator
 
 def main():
     parser = argparse.ArgumentParser(description="Meta-RL Scientist Async Event Loop")
@@ -34,6 +36,12 @@ def main():
     watcher.start()
     
     monitor = SingularityMonitor()
+    
+    # [PHASE 1] Global Trajectory Memory
+    tm = TrajectoryMemory(persistence_path="trajectories.pkl")
+    
+    # [PHASE 2] Symbolic Validator
+    validator = SymbolicValidator(time_budget_per_experiment=600.0) # 10 min budget
     
     # 2. Agent Population Management
     agents = {} # agent_id -> AgentObj
@@ -66,9 +74,18 @@ def main():
         # Give knowledge
         shard = kb.get_shard(idx, 100) # Pseudo-shard
         agent.set_knowledge_store(shard)
+        agent.set_trajectory_memory(tm) # [PHASE 1]
+        agent.set_validator(validator) # [PHASE 2]
         agents[aid] = agent
-        agent_status[aid] = "IDLE"
+        
+        # [PHASE 4] track active tasks
+        if 'active_counts' not in locals():
+            # This is just for safety, it will be initialized below
+            pass 
         return agent
+
+    # [PHASE 4] Multi-Task Status
+    active_counts = {f"Agent_{i+1}": 0 for i in range(args.num_agents)}
 
     # Initialize seed population
     for i in range(args.num_agents):
@@ -94,37 +111,43 @@ def main():
             results, rewards = lab.poll_results(agent_preferences=prefs)
             
             if results:
-                for aid, res in results.items():
-                    log.info(f"[Event] Experiment completed for {aid}. Reward: {res.final_mean_reward:.1f}")
+                for sub_id, res in results.items():
+                    # Map sub-id (e.g. Agent_1_h0) back to parent aid
+                    aid = sub_id.split("_h")[0]
+                    log.info(f"[Event] Experiment completed for {sub_id} (Agent: {aid}). Reward: {res.final_mean_reward:.1f}")
                     
                     if res:
-                        # [NEW] Relative Scaling Logic
-                        population_reward_history.append(rewards[aid])
-                        if len(population_reward_history) > reward_window:
-                            population_reward_history.pop(0)
+                        # [PHASE 4] Skip stats/completions for Horizon Dry-runs
+                        if not res.config.hyperparameters.get("is_horizon"):
+                            # Only real experiments count towards population stats
+                            population_reward_history.append(rewards[sub_id])
+                            if len(population_reward_history) > reward_window:
+                                population_reward_history.pop(0)
+                            
+                            # Update History for real runs
+                            if aid not in history: history[aid] = []
+                            history[aid].append(res.final_mean_reward)
                         
-                        pop_mean = sum(population_reward_history) / len(population_reward_history)
+                        pop_mean = sum(population_reward_history) / len(population_reward_history) if population_reward_history else 0.0
                         
                         # [NEW] Swarm Urgency (Survival Cost)
-                        # As the simulation progresses, meta-rewards face a small decay.
-                        # This increases the relative pressure for improvement.
                         survival_cost = 0.05
-                        relative_reward = (rewards[aid] - pop_mean) - survival_cost
+                        relative_reward = (rewards[sub_id] - pop_mean) - survival_cost
                         
-                        log.info(f"  - Meta-Reward: {rewards[aid]:.2f} (Rel: {relative_reward:+.2f}, Cost: {survival_cost})")
+                        log.info(f"  - Meta-Reward: {rewards[sub_id]:.2f} (Rel: {relative_reward:+.2f}, Cost: {survival_cost})")
                         
                         # Update Agent
                         if aid in agents:
                             # We update with RELATIVE reward to drive competition
                             agents[aid].update_knowledge(res)
                             monitor.check_safety(res)
-                            
-                            if aid not in history: history[aid] = []
-                            history[aid].append(res.final_mean_reward)
                     
                     # Mark Free
-                    agent_status[aid] = "IDLE"
-                    global_completions += 1
+                    if aid in active_counts:
+                        active_counts[aid] -= 1
+                    
+                    if not res.config.hyperparameters.get("is_horizon"):
+                        global_completions += 1
                     
                     # Log Progress
                     log.info(f"--- [bold yellow]Progress: {global_completions}/{args.steps}[/bold yellow] (Best: {lab.best_reward:.1f}) ---")
@@ -150,9 +173,8 @@ def main():
                 kb.process_file_queue(new_files)
 
             # C. Organic Scaling Logic
-            # Count busy agents
-            busy_count = sum(1 for s in agent_status.values() if s == "BUSY")
-            idle_count = sum(1 for s in agent_status.values() if s == "IDLE")
+            idle_count = sum(1 for c in active_counts.values() if c == 0)
+            busy_count = sum(c for c in active_counts.values())
             total_agents = len(agents)
             
             # Simple Heuristic: If everyone is busy, and we have CPU room, spawn more.
@@ -162,28 +184,33 @@ def main():
             if idle_count == 0 and busy_count < max_workers and total_agents < args.max_agents:
                 # Check cooling - don't spawn too fast? No, let's just spawn if slot open.
                 log.info(f"[Scaling] All agents busy ({busy_count}/{max_workers}). Expansion triggered!")
+                new_aid = f"Agent_{total_agents + 1}"
                 spawn_agent(total_agents + 1)
+                active_counts[new_aid] = 0
                 
-            # C. Organic Scaling Logic
-            # ... (Scaling logic stays same, checking available slots)
-            
             # [NEW] Priority Scheduling Logic
             # We only submit if Lab has slots
-            busy_count = sum(1 for s in agent_status.values() if s == "BUSY")
-            max_workers = lab.executor._max_workers
             
             # 1. Collect Proposals from IDLE agents into a priority buffer
             proposal_buffer = [] # (priority, aid, config)
             for aid, agent in agents.items():
-                if agent_status[aid] == "IDLE":
+                if active_counts[aid] == 0:
                     # Priority = -RecentMeanReward (higher reward -> lower priority value -> schedules first)
                     recent_perf = history.get(aid, [0.0])[-1]
                     priority = -recent_perf 
                     
                     obs = lab.get_observation()
-                    config = agent.propose_experiment(obs)
-                    proposal_buffer.append((priority, aid, config))
-                    agent_status[aid] = "QUEUED" # Intermediate state
+                    configs = agent.propose_experiment(obs)
+                    
+                    if isinstance(configs, list):
+                        for i, cfg in enumerate(configs):
+                            # Assign sub-id for multi-dispatch
+                            cfg.hyperparameters["sub_id"] = f"{aid}_h{i}"
+                            proposal_buffer.append((priority, aid, cfg))
+                    else:
+                        proposal_buffer.append((priority, aid, configs))
+                    
+                    active_counts[aid] = -1 # Special state: QUEUED (will be set to N on dispatch)
             
             # Sort buffer by priority
             proposal_buffer.sort(key=lambda x: x[0])
@@ -196,6 +223,15 @@ def main():
                     # [NEW] Pioneer Pressure (Phase 15: Intense)
                     # If elite, we FORCE them to the highest unlocked tier
                     unlocked_envs = lab.tiers[lab.tier]
+                    
+                    # [PHASE 2] Symbolic Verification
+                    is_valid, violations = validator.validate(config)
+                    if not is_valid:
+                        log.warning(f"[SymbolicGuard] Proposal from {aid} REJECTED: {violations}")
+                        # Reject and set to IDLE so it can rethink
+                        active_counts[aid] = 0
+                        continue
+
                     if aid in elite_aids:
                         if config.env_id not in unlocked_envs:
                             import random
@@ -230,20 +266,27 @@ def main():
                         
                     config.hyperparameters["total_timesteps"] = steps
                     
-                    log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for {steps//1000}k steps")
+                    # [PHASE 4] Reduced Budget for Horizon/Dry-run
+                    if config.hyperparameters.get("is_horizon"):
+                        config.hyperparameters["total_timesteps"] = 5000 # Much faster
+                        log.info(f"  - [Horizon] Using reduced budget (5k steps) for dry-run.")
+
+                    log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for {config.hyperparameters['total_timesteps']//1000}k steps")
+                    
+                    sub_id = config.hyperparameters.get("sub_id", aid)
+                    
                     from concurrent.futures.process import BrokenProcessPool
                     try:
-                        lab.submit_experiment(aid, config)
-                        agent_status[aid] = "BUSY"
+                        lab.submit_experiment(sub_id, config)
+                        if active_counts[aid] == -1: active_counts[aid] = 0
+                        active_counts[aid] += 1
                         busy_count += 1
                     except BrokenProcessPool:
                         log.error("[CRITICAL] Process Pool Broken. Simulation terminating.")
                         raise KeyboardInterrupt # Trigger finally block
                 else:
                     # Put back to IDLE so we can re-evaluate priority next tick
-                    agent_status[aid] = "IDLE"
-            
-            # ... (Periodic Vision Analysis logic stays same)
+                    active_counts[aid] = 0
             
             # E. Periodic Vision Analysis (every 60s)
             if args.visual and (time.time() - last_vision_time > 60):
