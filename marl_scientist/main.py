@@ -76,31 +76,55 @@ def main():
                 log.info(f"[KnowledgeWatcher] Detected {len(new_files)} new files. Processing...")
                 kb.process_file_queue(new_files)
             
-            # 2. Agent Action
-            actions = {}
+            # 2. Agent Action & Resource Allocation
+            # Determine trials per agent based on performance
+            # Default: 1 trial. Top performer: 2 trials (if safe).
+            
+            # Identify top agent
+            best_agent = None
+            if step > 0:
+                best_agent = max(agents, key=lambda a: a.best_performance)
+            
+            trial_queue = []
             for agent in agents:
-                config = agent.propose_experiment(obs)
-                actions[agent.agent_id] = config
-                log.info(f"Agent {agent.agent_id} proposes: [yellow]{config.algorithm}[/yellow] with lr={config.hyperparameters.get('learning_rate', 'N/A'):.2e}")
+                trial_queue.append((agent, agent.agent_id)) # Standard slot
+                
+                # Bonus slot logic
+                if step > 0 and agent == best_agent and agent.best_performance > 0:
+                     log.info(f"[Resource] Granting BONUS trial to top agent: {agent.agent_id}")
+                     trial_queue.append((agent, f"{agent.agent_id}_bonus"))
+
+            actions = {}
+            for agent_obj, run_id in trial_queue:
+                # We need to distinguish the run_id in the actions dict
+                # The agent itself doesn't know about run_id, so we just ask it to propose
+                config = agent_obj.propose_experiment(obs)
+                actions[run_id] = config
+                log.info(f"Agent {run_id} proposes: [yellow]{config.algorithm}[/yellow] with lr={config.hyperparameters.get('learning_rate', 'N/A'):.2e}")
                 
             # 3. Environment Step
             log.info("Running experiments (this may take a moment)...")
             results, rewards = lab.step(actions)
             
             # 4. Learning & Safety Check
-            for agent in agents:
-                if agent.agent_id not in results: 
+            for agent_obj, run_id in trial_queue:
+                if run_id not in results: 
                     # E.g. agent failed experiment
                     continue
                     
-                result = results[agent.agent_id]
-                reward = rewards.get(agent.agent_id, 0.0)
+                result = results[run_id]
+                if result is None:
+                    log.warning(f"Experiment failed for {run_id}, skipping update.")
+                    continue
+                reward = rewards.get(run_id, 0.0)
                 
-                log.info(f"Result for {agent.agent_id}: Reward=[bold]{result.final_mean_reward:.2f}[/bold], NoveltyBonus={reward:.2f}")
-                history[agent.agent_id].append(result.final_mean_reward)
+                log.info(f"Result for {run_id}: Reward=[bold]{result.final_mean_reward:.2f}[/bold], NoveltyBonus={reward:.2f}")
+                history[agent_obj.agent_id].append(result.final_mean_reward)
                 
                 monitor.check_safety(result)
-                agent.update_knowledge(result)
+                agent_obj.update_knowledge(result)
+                # TODO: In PPO, we'd add this experience to the agent's buffer here.
+                # Since agent_obj is the same instance, it learns from both trials!
                 
             # 5. Dashboard Export
             export_dashboard_data(agents, step + 1)

@@ -17,7 +17,7 @@ class MetaBrain(nn.Module):
         knowledge_dim: int = 768, # Matches LLM embeddings
         hidden_dim: int = 256,
         num_algos: int = 4,
-        num_envs: int = 4,
+        num_envs: int = 5,
         num_continuous_hps: int = 6
     ):
         super().__init__()
@@ -96,7 +96,7 @@ class BrainEncoder:
     """Helper to convert core objects to tensors for the Brain."""
     
     ALGOS = ["PPO", "A2C", "DQN", "SAC"]
-    ENVS = ["CartPole-v1", "LunarLander-v3", "Pendulum-v1", "Acrobot-v1"]
+    ENVS = ["CartPole-v1", "LunarLander-v3", "Pendulum-v1", "Acrobot-v1", "MountainCarContinuous-v0"]
     
     def __init__(self, history_len: int = 10):
         self.history_len = history_len
@@ -204,6 +204,7 @@ class BrainEncoder:
             "gamma": float(scale(hp_vals[1], 0.8, 0.9999)),
             "ent_coef": float(scale(hp_vals[2], 0.0, 0.1)),
             "gae_lambda": float(scale(hp_vals[3], 0.8, 1.0)),
+            "total_timesteps": 2048 # Default to small runs for speed
         }
         
         # Add algo-specific defaults/scaling
@@ -214,7 +215,9 @@ class BrainEncoder:
             hps["batch_size"] = int(scale(hp_vals[4], 32, 256))
             hps["learning_starts"] = int(scale(hp_vals[5], 100, 5000))
         elif algo == "SAC":
-             hps["gradient_steps"] = int(scale(hp_vals[4], 1, 10))
-             hps["tau"] = float(scale(hp_vals[5], 0.001, 0.1))
+             hps["gradient_steps"] = 1 # Force 1 update per step for speed
+             hps["tau"] = float(scale(hp_vals[5], 0.005, 0.05))
+             hps["batch_size"] = int(scale(hp_vals[4], 64, 256)) # Reuse hp[4] since grad_steps removed
+             hps["total_timesteps"] = 1024 # Extra short for SAC stability check
         
         return {"algorithm": algo, "env_id": env, "hyperparameters": hps}

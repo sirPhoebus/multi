@@ -140,7 +140,9 @@ class SB3ExperimentRunner:
             eval_env = gym.make(self.env_id)
             curve_callback = CurveCallback(eval_env, eval_freq=1000)
             
-            total_timesteps = 10000
+            curve_callback = CurveCallback(eval_env, eval_freq=1000)
+            
+            total_timesteps = hp.get("total_timesteps", 10000)
             model.learn(total_timesteps=total_timesteps, callback=curve_callback)
             
             # 5. Evaluate Final

@@ -94,11 +94,52 @@ class NeuralResearcherAgent(Researcher):
                 self.hidden_state
             )
             
+            # [NEW] Curriculum Masking
+            if "allowed_envs" in observation.env_metadata:
+                allowed_names = observation.env_metadata["allowed_envs"]
+                mask = torch.full_like(env_logits, -float('inf'))
+                
+                # Active Envs indices
+                for name in allowed_names:
+                    if name in self.encoder.ENVS:
+                        idx = self.encoder.ENVS.index(name)
+                        mask[0, idx] = 0.0 # Unmask
+                
+                # Apply mask
+                env_logits = env_logits + mask
+            
             self.hidden_state = new_hidden
             
-            # Select best/sampled actions (assuming Eval mode)
-            algo_idx = torch.argmax(algo_logits, dim=-1).item()
+            # 1. Select Environment First
             env_idx = torch.argmax(env_logits, dim=-1).item()
+            selected_env = self.encoder.ENVS[env_idx]
+            
+            # 2. Compatibility Masking for Algorithm
+            # Discrete: CartPole, LunarLander, Acrobot
+            # Continuous: Pendulum, MountainCarContinuous
+            discrete_envs = ["CartPole-v1", "LunarLander-v3", "Acrobot-v1"]
+            continuous_envs = ["Pendulum-v1", "MountainCarContinuous-v0"]
+            
+            algo_mask = torch.zeros_like(algo_logits)
+            
+            if selected_env in discrete_envs:
+                # Mask SAC (Index 3 in BrianEncoder.ALGOS=["PPO", "A2C", "DQN", "SAC"])
+                # PPO(0), A2C(1), DQN(2), SAC(3)
+                if "SAC" in self.encoder.ALGOS:
+                    sac_idx = self.encoder.ALGOS.index("SAC")
+                    algo_mask[0, sac_idx] = -float('inf')
+                    
+            elif selected_env in continuous_envs:
+                # Mask DQN (Index 2)
+                if "DQN" in self.encoder.ALGOS:
+                    dqn_idx = self.encoder.ALGOS.index("DQN")
+                    algo_mask[0, dqn_idx] = -float('inf')
+            
+            # Apply Algo Mask
+            algo_logits = algo_logits + algo_mask
+            
+            # 3. Select Algorithm
+            algo_idx = torch.argmax(algo_logits, dim=-1).item()
             hp_vals = hp_means.squeeze(0).cpu().numpy()
             
         # 4. Decode to Config

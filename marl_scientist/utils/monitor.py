@@ -11,6 +11,10 @@ def export_dashboard_data(agents, step, filepath="marl_scientist/dashboard/data.
         "agents": {}
     }
     
+    # Sort agents by performance to determine rank
+    sorted_agents = sorted(agents, key=lambda a: a.best_performance, reverse=True)
+    rank_map = {a.agent_id: i+1 for i, a in enumerate(sorted_agents)}
+
     for agent in agents:
         # Get graph data from networkx
         if hasattr(agent, "causal_model"):
@@ -38,7 +42,9 @@ def export_dashboard_data(agents, step, filepath="marl_scientist/dashboard/data.
         data["agents"][agent.agent_id] = {
             "nodes": nodes,
             "edges": edges,
-            "best_score": agent.best_performance
+            "best_score": agent.best_performance,
+            "rank": rank_map.get(agent.agent_id, 0),
+            # Ideally we track efficiency too
         }
         
     # Ensure dir exists
