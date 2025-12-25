@@ -189,28 +189,27 @@ def main():
             proposal_buffer.sort(key=lambda x: x[0])
             
             # 2. Dispatch from buffer to Lab as long as slots are open
-            n_elites = max(1, len(agents) // 4)
-            elite_aids = [aid for _, aid, _ in proposal_buffer[:n_elites]]
+            elite_aids = [aid for _, aid, _ in proposal_buffer[:3]] # [FIX] Top 3 performers
             
             for _, aid, config in proposal_buffer:
                 if busy_count < max_workers:
-                    # [NEW] Pioneer Pressure
-                    # If elite, we check if they are proposing from the highest unlocked tier
+                    # [NEW] Pioneer Pressure (Phase 15: Intense)
+                    # If elite, we FORCE them to the highest unlocked tier
                     unlocked_envs = lab.tiers[lab.tier]
-                    if aid in elite_aids and config.env_id not in unlocked_envs and lab.tier > 0:
-                        # Force them to a random env from the new tier
-                        import random
-                        old_env = config.env_id
-                        config.env_id = random.choice(unlocked_envs)
-                        log.info(f"[Pioneer] Redirecting Elite {aid} from {old_env} to {config.env_id}!")
+                    if aid in elite_aids:
+                        if config.env_id not in unlocked_envs:
+                            import random
+                            old_env = config.env_id
+                            config.env_id = random.choice(unlocked_envs)
+                            log.info(f"[Pioneer] Mandatory Redirection for Top-3 Elite {aid} from {old_env} to {config.env_id}!")
                         
-                        # [FIX] Ensure Algorithm is compatible with NEW environment
+                        # [FIX] Ensure Algorithm is compatible with NEW environment (even if not redirected)
                         env_meta = lab.env_metadata.get(config.env_id, {})
                         if env_meta.get("is_continuous") and config.algorithm == "DQN":
-                            config.algorithm = "SAC" # Best fallback for continuous
+                            config.algorithm = "SAC" 
                             log.info(f"  - Algorithm adjusted to {config.algorithm} for Continuous compatibility.")
                         elif env_meta.get("is_discrete") and config.algorithm == "SAC":
-                            config.algorithm = "PPO" # Best fallback for discrete
+                            config.algorithm = "PPO"
                             log.info(f"  - Algorithm adjusted to {config.algorithm} for Discrete compatibility.")
 
                     # [NEW] Tiered Step Budget
