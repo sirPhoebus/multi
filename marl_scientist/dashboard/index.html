@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meta-RL Scientist | Causal Dashboard</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Meta-RL Scientist <span class="badge">Live</span></h1>
+            <div class="meta-info">
+                <span id="step-counter">Step: 0</span>
+                <span id="status">Waiting for data...</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="sidebar">
+                <h2>Agents</h2>
+                <div id="agent-list" class="agent-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+            
+            <div class="visualization">
+                <div id="mynetwork"></div>
+                <div class="legend">
+                    <div class="item"><span class="dot green"></span> Positive Correlation</div>
+                    <div class="item"><span class="dot red"></span> Negative Correlation</div>
+                    <div class="item"><span class="line-thick"></span> Str. Strength</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

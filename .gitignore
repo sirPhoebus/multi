@@ -1,0 +1,10 @@
+__pycache__
+.venv
+.env
+*.pkl
+*.log
+*.json
+*.zip
+*.pyc
+saves/*
+marl_scientist.egg-info/*

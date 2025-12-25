@@ -1,0 +1,27 @@
+[project]
+name = "marl-scientist"
+version = "0.1.0"
+description = "A closed-loop multi-agent RL environment for automated algorithm discovery"
+authors = [
+    {name = "User", email = "user@example.com"},
+]
+dependencies = [
+    "stable-baselines3>=2.0.0",
+    "gymnasium>=0.29.0",
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "networkx>=3.0",  # For Causal Graph
+    "scikit-learn>=1.2.0" # For embedding distance/metrics
+]
+requires-python = ">=3.9"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
