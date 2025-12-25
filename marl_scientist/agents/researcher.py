@@ -141,7 +141,7 @@ class ResearcherAgent(Researcher):
             parent = getattr(self.knowledge_store, "parent_store", self.knowledge_store)
             
             # Synthesize
-            llm_config_dict = parent.suggest_config_from_paper(text)
+            llm_config_dict = parent.suggest_config_from_paper(text, paper_title=meta.get('title', 'Unknown'))
             
             if llm_config_dict:
                 # Merge with our defaults to ensure validity (e.g. if LLM missed net_arch)
@@ -247,7 +247,12 @@ class ResearcherAgent(Researcher):
             hp["gradient_steps"] = random.choice([1, 2, 4]) # Steps per update
             hp["ent_coef"] = "auto" 
             
-        return ExperimentConfig(algorithm=algo, hyperparameters=hp)
+        # Select Environment (New in Step 9)
+        # We start simple: Randomly choose or stick to CartPole if stable
+        # For now, let's explore diversity
+        env_id = random.choice(["CartPole-v1", "Acrobot-v1"])
+        
+        return ExperimentConfig(algorithm=algo, hyperparameters=hp, env_id=env_id)
 
     def _mutate_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
         """Apply random mutations to hyperparameters or architecture."""

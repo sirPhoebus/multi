@@ -12,7 +12,7 @@ def run_experiment_task(config: ExperimentConfig, agent_id: str) -> Tuple[str, E
     try:
         # Create a fresh runner for this process
         # We use a default env for now, or could pass it in config if needed
-        runner = SB3ExperimentRunner(benchmark_env_id="CartPole-v1")
+        runner = SB3ExperimentRunner(benchmark_env_id=config.env_id)
         result = runner.run(config)
         return agent_id, result, None
     except Exception as e:

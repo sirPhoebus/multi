@@ -252,10 +252,16 @@ class RealKnowledgeStore:
         except Exception as e:
             print(f"[KnowledgeStore] Save failed: {e}")
 
-    def suggest_config_from_paper(self, paper_text: str) -> Dict[str, Any]:
+    def suggest_config_from_paper(self, paper_text: str, paper_title: str = "Unknown Paper") -> Dict[str, Any]:
         """
         Uses LLM to extract a valid RL configuration from a paper summary.
         """
+        if not paper_text or len(paper_text) < 10:
+             # Skip empty papers
+             with open("failed_papers.txt", "a", encoding="utf-8") as f:
+                 f.write(f"SKIPPED (Empty): {paper_title}\n")
+             return None
+             
         prompt = f"""
 You are an expert Machine Learning Engineer.
 Read this research paper summary and extract a specific, valid hyperparameter configuration that helps achieve the goals mentioned.
@@ -304,8 +310,30 @@ Rules:
                 return config
             except Exception as e:
                 print(f"[KnowledgeStore] Attempt {attempt+1}/{max_retries} failed: {e}")
+                
+                # Try simple repair for truncated JSON
+                if "Expecting ',' delimiter" in str(e) or "Expecting value" in str(e) or "Unterminated string" in str(e):
+                    try:
+                        # Don't try to repair empty strings
+                        if not clean_text:
+                            raise ValueError("Empty response")
+                            
+                        # Heuristic: Append brackets and retry
+                        print(f"[KnowledgeStore] Attempting repair on truncated JSON...")
+                        repaired_text = clean_text + "}}"
+                        config = json.loads(repaired_text)
+                        
+                        if "algorithm" in config and "hyperparameters" in config:
+                            print(f"[KnowledgeStore] Repair successful!")
+                            return config
+                    except:
+                        pass
+                
                 if attempt == max_retries - 1:
-                    print(f"[DEBUG] Failed JSON Text: {clean_text if 'clean_text' in locals() else 'N/A'}")
+                    print(f"[DEBUG] Failed. Raw Response: {response[:200]}...")
+                    # Log failure
+                    with open("failed_papers.txt", "a", encoding="utf-8") as f:
+                        f.write(f"FAILED (JSON): {paper_title} | Error: {e}\n")
                     return None
         return None
 
@@ -325,6 +353,52 @@ Rules:
         except Exception as e:
             print(f"[KnowledgeStore] Load failed: {e}")
 
+    def synthesize_new_paper(self, result: ExperimentResult, author_id: str) -> Dict[str, Any]:
+        """
+        Creates a 'paper' representation of an experiment result.
+        """
+        title = f"Empirical Study of {result.config.algorithm} with Reward {result.final_mean_reward:.1f}"
+        
+        # Summarize HPs
+        hp_str = ", ".join([f"{k}={v}" for k,v in result.config.hyperparameters.items()])
+        
+        text = f"""
+        Title: {title}
+        Authors: {author_id}
+        Abstract: We investigated {result.config.algorithm} with hyperparameters: {hp_str}.
+        The experiment yielded a mean reward of {result.final_mean_reward:.2f}.
+        This configuration showed {'high' if result.final_mean_reward > 400 else 'moderate'} stability.
+        """
+        
+        paper = {
+            "text": text.strip(),
+            "metadata": {
+                "title": title,
+                "author": author_id,
+                "reward": result.final_mean_reward,
+                "source": "lab_generated"
+            }
+        }
+        return paper
+
+    def add_paper(self, paper: Dict[str, Any]):
+        """
+        Adds a single paper to the journal (dynamic knowledge).
+        """
+        self.journal_documents.append(paper["text"])
+        self.journal_metadatas.append(paper["metadata"])
+        # No embedding update for now to avoid latency, OR we do lazy embedding
+        # Ideally we embed it:
+        try:
+             emb = self.client.get_embedding(paper["text"]).reshape(1, -1)
+             if self.journal_embeddings is None:
+                 self.journal_embeddings = emb
+             else:
+                 self.journal_embeddings = np.vstack([self.journal_embeddings, emb])
+             print(f"[KnowledgeStore] Journal updated with paper: {paper['metadata']['title']}")
+        except:
+             pass
+
 class KnowledgeShard:
     def __init__(self, docs, metas, embeddings, client, parent_store):
         self.documents = docs
@@ -332,6 +406,12 @@ class KnowledgeShard:
         self.embeddings = embeddings
         self.client = client
         self.parent_store = parent_store
+        
+    def synthesize_new_paper(self, result: ExperimentResult, author_id: str) -> Dict[str, Any]:
+        return self.parent_store.synthesize_new_paper(result, author_id)
+
+    def add_paper(self, paper: Dict[str, Any]):
+        return self.parent_store.add_paper(paper)
         
     def search(self, query: str, k: int = 3):
         # 1. Local Search

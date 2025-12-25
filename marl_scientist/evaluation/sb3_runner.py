@@ -68,6 +68,10 @@ class SB3ExperimentRunner:
                     if key in hp: algo_kwargs[key] = hp.pop(key)
             
             elif config.algorithm == "SAC":
+                # Guard: SAC only supports Box (Continuous) action spaces
+                import gymnasium
+                if not isinstance(env.action_space, gymnasium.spaces.Box):
+                    raise ValueError(f"SAC does not support action space {env.action_space}. Use PPO/DQN/A2C for Discrete environments.")
                 if "ent_coef" in hp: algo_kwargs["ent_coef"] = hp.pop("ent_coef")
                 
             # 3. Instantiate Model
@@ -80,35 +84,62 @@ class SB3ExperimentRunner:
             )
             
             # 4. Train
-            # Fixed budget for inner loop to keep it fast
-            total_timesteps = 5000 
-            model.learn(total_timesteps=total_timesteps)
+            # Use a simple callback to populate training curve every 1000 steps
+            from stable_baselines3.common.callbacks import BaseCallback
             
-            # 5. Evaluate
+            class CurveCallback(BaseCallback):
+                def __init__(self, eval_env, eval_freq=1000):
+                    super().__init__(verbose=0)
+                    self.eval_env = eval_env
+                    self.eval_freq = eval_freq
+                    self.curve = []
+                def _on_step(self) -> bool:
+                    # eval_freq needs to be relative to num_timesteps
+                    if self.num_timesteps % self.eval_freq == 0:
+                        m_reward, _ = evaluate_policy(self.model, self.eval_env, n_eval_episodes=5)
+                        self.curve.append(float(m_reward))
+                    return True
+            
+            eval_env = gym.make(self.env_id)
+            curve_callback = CurveCallback(eval_env, eval_freq=1000)
+            
+            total_timesteps = 10000
+            model.learn(total_timesteps=total_timesteps, callback=curve_callback)
+            
+            # 5. Evaluate Final
             mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=5)
             
-            # Try to get entropy from the model (proxy for exploration)
-            # SB3 models don't easily expose this after training without a forward pass or logger inspection
-            # We will use std_reward as a proxy for "Performance Stability"
-            # And we can try to estimate "Action Entropy" by running a few steps if we wanted, 
-            # but for now let's just use std_reward and maybe training duration or similar.
+            training_curve = curve_callback.curve
+            
+            # Cleanup! CRITICAL to prevent resource leaks
+            eval_env.close()
+            env.close()
             
             metrics = {
                 "std_reward": float(std_reward),
                 "stability": 1.0 / (float(std_reward) + 1e-6),
-                # "exploration": ... (Hard to get without custom callback)
             }
             
             return ExperimentResult(
                 config=config,
                 final_mean_reward=mean_reward,
-                training_curve=[], 
+                training_curve=training_curve, 
                 metrics=metrics
             )
             
         except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
             # Handle crash (e.g., unstable params)
-            print(f"Experiment failed ({config.algorithm}): {e}")
+            print(f"Experiment failed ({config.algorithm}): {e}\n{tb}")
+            
+            # Attempt cleanup if envs exist
+            try:
+                if 'eval_env' in locals(): eval_env.close()
+                if 'env' in locals(): env.close()
+            except:
+                pass
+                
             return ExperimentResult(
                 config=config,
                 final_mean_reward=-500.0, # Penalize crash

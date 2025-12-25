@@ -10,6 +10,7 @@ class ExperimentConfig:
     """
     algorithm: str  # "PPO", "A2C", "DQN"
     hyperparameters: Dict[str, Union[float, int, str]]
+    env_id: str = "CartPole-v1" # Default env
     # Future: architecture_graph: Dict...
 
 @dataclasses.dataclass
