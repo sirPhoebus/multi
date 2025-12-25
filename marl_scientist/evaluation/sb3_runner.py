@@ -59,10 +59,11 @@ class SB3ExperimentRunner:
                          bs = hp["batch_size"]
                          remainder = n_steps % bs
                          if remainder != 0:
-                             # Round down n_steps to nearest multiple of bs
-                             new_n_steps = max(bs, n_steps - remainder)
+                             # Round up n_steps to nearest multiple of bs
+                             # This ensures the buffer is large enough for the batch
+                             new_n_steps = ((n_steps // bs) + 1) * bs
                              hp["n_steps"] = new_n_steps
-                             # print(f"[SB3Runner] Adjusted n_steps {n_steps} -> {new_n_steps} to be multiple of batch_size {bs}")
+                             # print(f"[SB3Runner] Adjusted n_steps {n_steps} -> {new_n_steps} for batch_size {bs}")
                          
                  elif config.algorithm in ["DQN", "SAC"]:
                      # Off-policy uses explicit buffer_size
@@ -83,11 +84,15 @@ class SB3ExperimentRunner:
             # Common SB3 Params that might need filtering per algo
             # We construct a dictionary of valid args
             
+            # Common SB3 Params that might need filtering per algo
+            # We construct a dictionary of valid args
+            
             algo_kwargs = {}
             
             # Universal Params (most algos support these)
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
+            print(f"[{agent_id}] Training {config.algorithm} on {config.env_id} | Device: {device} | Batch: {hp.get('batch_size', 'N/A')} | Arch: {hp.get('net_arch', 'default')}")
             
             for key in ["learning_rate", "gamma", "seed", "verbose"]:
                 if key in hp: algo_kwargs[key] = hp.pop(key)
@@ -153,16 +158,54 @@ class SB3ExperimentRunner:
                             # Sometimes eval fails on Discrete vs Box mismatches if env not reset
                             pass 
                     return True
+
+            class StagnationCallback(BaseCallback):
+                def __init__(self, threshold=1.0, window=50000, check_freq=10000):
+                    super().__init__(verbose=0)
+                    self.threshold = threshold
+                    self.window = window
+                    self.check_freq = check_freq
+                    self.history = [] # (timestep, mean_reward)
+                    self.stopped_early = False
+                
+                def _on_step(self) -> bool:
+                    if self.num_timesteps % self.check_freq == 0:
+                        if len(self.model.ep_info_buffer) > 0:
+                            current_reward = np.mean([ep['r'] for ep in self.model.ep_info_buffer])
+                            self.history.append((self.num_timesteps, current_reward))
+                            
+                            if self.num_timesteps >= self.window:
+                                start_ts = self.num_timesteps - self.window
+                                past_rewards = [r for ts, r in self.history if ts <= start_ts]
+                                if past_rewards:
+                                    improvement = current_reward - past_rewards[-1]
+                                    if improvement < self.threshold:
+                                        print(f"[SB3Runner] EARLY STOP: Timestep {self.num_timesteps}, Improvement {improvement:.2f} < {self.threshold}")
+                                        self.stopped_early = True
+                                        return False
                     return True
             
             eval_env = gym.make(self.env_id, render_mode="rgb_array" if visual else None)
             curve_callback = CurveCallback(eval_env, eval_freq=1000)
             
+            # [PHASE 4] Early Stopping
+            stagnation_thresh = config.hyperparameters.get("stagnation_threshold", 1.0)
+            stagnation_window = config.hyperparameters.get("stagnation_window", 50000)
+            stagnation_callback = StagnationCallback(threshold=stagnation_thresh, window=stagnation_window)
+            
+            from stable_baselines3.common.callbacks import CallbackList
+            callbacks = CallbackList([curve_callback, stagnation_callback])
+            
             total_timesteps = hp.get("total_timesteps", 10000)
-            model.learn(total_timesteps=total_timesteps, callback=curve_callback)
+            model.learn(total_timesteps=total_timesteps, callback=callbacks)
             
             # 5. Evaluate Final
             mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=5)
+            
+            # [PHASE 4] Stagnation Penalty
+            if stagnation_callback.stopped_early:
+                mean_reward -= 10.0 # Small penalty for stagnation
+                print(f"[{agent_id}] Applying stagnation penalty (-10.0). Final Adj Reward: {mean_reward:.2f}")
             
             training_curve = curve_callback.curve
             

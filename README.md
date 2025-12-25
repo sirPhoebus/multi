@@ -38,10 +38,11 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
     - **Fast-Efficient**: Prioritizes speed and sample efficiency.
     - **Stable-Reliable**: Prioritizes consistency and low variance.
 - **Multi-Objective Rewards**: Laboratory evaluation incorporates Performance, Stability, Efficiency, and Novelty into a single weighted meta-reward.
-41: 
-42: ### 🛡️ D3 Engine Integration (Neuro-Symbolic)
-43: - **Trajectory Vector Compression**: Summarizes and embeds past experiments into a fixed vector space, providing the swarm with "Negative Knowledge" to avoid past failures.
-44: - **Symbolic Verification Layer**: A deterministic guard that validates hyperparameters and estimates resource budgets before execution, ensuring safety and efficiency.
+
+### ⚡ Async-First Core
+- **Non-Blocking Simulation**: The main loop is fully asynchronous, ensuring that slow LLM operations (embeddings, chat, vision) never stall agent decision-making.
+- **Async Knowledge Store**: Distributed knowledge shards and the shared journal leverage `httpx` for high-concurrency external API calls.
+- **Dynamic Ingestion**: The `KnowledgeWatcher` detects new files and processes them in the background, allowing the project to learn in real-time.
 
 ### 🛡️ D3 Engine Integration (Neuro-Symbolic)
 - **Trajectory Vector Compression**: Summarizes and embeds past experiments into a fixed vector space, providing the swarm with "Negative Knowledge" to avoid past failures.
@@ -100,5 +101,6 @@ Drop `.txt` or `.md` files into `knowledge/`. The **Async Watcher** will instant
 - [x] Multi-Agent Competitive Meta-Training (Self-Play)
 - [x] Trajectory Vector Compression (D3 Engine Phase 1)
 - [x] Symbolic Verification Layer (D3 Engine Phase 2)
-- [ ] Active/Latent Agent Brain Split (D3 Engine Phase 3)
+- [x] Async-First Engine (Async LLM, Async Knowledge Store)
+- [x] Active/Latent Agent Brain Split (D3 Engine Phase 3)
 - [ ] Dynamic Neural Architecture Synthesis

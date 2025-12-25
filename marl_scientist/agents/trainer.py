@@ -30,38 +30,50 @@ class MetaPPOTrainer:
         
         self.mse_loss = nn.MSELoss()
         
+        # [PHASE 2] LR Scheduler
+        self.scheduler = optim.lr_scheduler.LinearLR(self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=100)
+        
     def select_action(self, inputs: Dict[str, torch.Tensor], hidden_state: Optional[torch.Tensor]):
         """
         Samples actions from the brain and returns log_probs for training.
         """
         self.brain.eval()
         with torch.no_grad():
-            algo_logits, env_logits, hp_means, value, new_hidden = self.brain(
+            algo_logits, env_logits, hp_means, value, new_hidden, goal_logits = self.brain(
                 inputs["history"],
                 inputs["trends"],
                 inputs["knowledge"],
+                inputs.get("latent"), # Pass latent context if available
+                None, # memory_context
+                None, # preference_vec (uses default)
                 hidden_state
             )
             
-            # Algo selection
+            # 1. Goal selection
+            dist_goal = Categorical(logits=goal_logits)
+            goal_idx = dist_goal.sample()
+            
+            # 2. Algo selection
             dist_algo = Categorical(logits=algo_logits)
             algo_idx = dist_algo.sample()
             
-            # Env selection
+            # 3. Env selection
             dist_env = Categorical(logits=env_logits)
             env_idx = dist_env.sample()
             
-            # HP selection (using repo's shared logstd)
+            # 4. HP selection
             hp_std = torch.exp(self.brain.hp_logstd)
             dist_hp = Normal(hp_means, hp_std)
             hp_vals = dist_hp.sample()
             
             # Pack log probs
-            log_prob = dist_algo.log_prob(algo_idx) + \
+            log_prob = dist_goal.log_prob(goal_idx) + \
+                       dist_algo.log_prob(algo_idx) + \
                        dist_env.log_prob(env_idx) + \
                        dist_hp.log_prob(hp_vals).sum(dim=-1)
                        
         return {
+            "goal_idx": goal_idx.item(),
             "algo_idx": algo_idx.item(),
             "env_idx": env_idx.item(),
             "hp_vals": hp_vals.squeeze(0).cpu().numpy(),
@@ -71,72 +83,76 @@ class MetaPPOTrainer:
             "new_hidden": new_hidden
         }
 
-    def update(self, memory: List[Dict[str, Any]]):
+    def update(self, memory: List[Dict[str, Any]], gae_lambda: float = 0.95):
         """
-        Performs PPO update on collected trajectories.
+        Performs PPO update on collected trajectories using GAE.
         """
+        if not memory: return 0.0
+        
         self.brain.train()
         
         # 1. Prepare Tensors
-        # Flattened memory to batch
-        # We assume single-trajectory updates for now, or multiple if memory is large
-        
-        # Calculate Returns and Advantages (GAE or simple)
         rewards = [m['reward'] for m in memory]
         values = [m['value'] for m in memory]
         is_terminals = [m['done'] for m in memory]
         
+        # [NEW] GAE Calculation
         returns = []
-        discounted_reward = 0
-        for reward, is_terminal in zip(reversed(rewards), reversed(is_terminals)):
-            if is_terminal:
-                discounted_reward = 0
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            returns.insert(0, discounted_reward)
+        advantages = []
+        gae = 0
+        last_value = 0 # In a real env, we might use the value of the next state if not terminal
+        
+        for i in reversed(range(len(rewards))):
+            mask = 0 if is_terminals[i] else 1
+            delta = rewards[i] + self.gamma * last_value * mask - values[i]
+            gae = delta + self.gamma * gae_lambda * mask * gae
+            advantages.insert(0, gae)
+            returns.insert(0, gae + values[i])
+            last_value = values[i]
             
-        returns = torch.tensor(returns, dtype=torch.float32)
-        old_log_probs = torch.tensor([m['log_prob'] for m in memory], dtype=torch.float32)
-        old_values = torch.tensor(values, dtype=torch.float32)
-        advantages = returns - old_values
+        returns = torch.tensor(returns, dtype=torch.float32).to(self.brain.hp_logstd.device)
+        old_log_probs = torch.tensor([m['log_prob'] for m in memory], dtype=torch.float32).to(self.brain.hp_logstd.device)
+        advantages = torch.tensor(advantages, dtype=torch.float32).to(self.brain.hp_logstd.device)
         
         # Normalize advantages
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
+        total_epoch_loss = 0
         for _ in range(self.k_epochs):
-            # Evaluate current policy
-            # We need to re-run the brain on ALL steps in memory (preserving hidden states)
-            # This is slow but necessary for RNN. 
-            # In a real system, we'd use BPTT or fixed hidden states.
-            
             total_loss = 0
             
-            # To handle RNN properly, we should iterate in sequence or use packed sequences.
-            # For this MVP, let's treat each step as independent or use the stored hidden states 
-            # (which is 'fixed-state' policy optimization).
-            
+            # Handle hidden states properly
             for i, m in enumerate(memory):
                 inputs = m['inputs']
                 h = m['hidden']
                 
-                curr_algo_logits, curr_env_logits, curr_hp_means, curr_value, _ = self.brain(
-                    inputs["history"],
-                    inputs["trends"],
-                    inputs["knowledge"],
+                # Move inputs to device
+                d_inputs = {k: v.to(self.brain.hp_logstd.device) for k, v in inputs.items()}
+                if h is not None: h = h.to(self.brain.hp_logstd.device)
+                
+                curr_algo_logits, curr_env_logits, curr_hp_means, curr_value, _, curr_goal_logits = self.brain(
+                    d_inputs["history"],
+                    d_inputs["trends"],
+                    d_inputs["knowledge"],
+                    d_inputs.get("latent"),
+                    None, None,
                     h
                 )
                 
                 # Distributions
+                d_goal = Categorical(logits=curr_goal_logits)
                 d_algo = Categorical(logits=curr_algo_logits)
                 d_env = Categorical(logits=curr_env_logits)
                 d_hp = Normal(curr_hp_means, torch.exp(self.brain.hp_logstd))
                 
                 # New log probs of the OLD actions
-                lp_algo = d_algo.log_prob(torch.tensor([m['algo_idx']]))
-                lp_env = d_env.log_prob(torch.tensor([m['env_idx']]))
-                lp_hp = d_hp.log_prob(torch.tensor(m['hp_vals'])).sum(dim=-1)
+                lp_goal = d_goal.log_prob(torch.tensor([m['goal_idx']], device=self.brain.hp_logstd.device))
+                lp_algo = d_algo.log_prob(torch.tensor([m['algo_idx']], device=self.brain.hp_logstd.device))
+                lp_env = d_env.log_prob(torch.tensor([m['env_idx']], device=self.brain.hp_logstd.device))
+                lp_hp = d_hp.log_prob(torch.tensor(m['hp_vals'], device=self.brain.hp_logstd.device)).sum(dim=-1)
                 
-                new_lp = lp_algo + lp_env + lp_hp
-                entropy = d_algo.entropy() + d_env.entropy() + d_hp.entropy().sum()
+                new_lp = lp_goal + lp_algo + lp_env + lp_hp
+                entropy = d_goal.entropy() + d_algo.entropy() + d_env.entropy() + d_hp.entropy().sum()
                 
                 # PPO Ratio
                 ratio = torch.exp(new_lp - old_log_probs[i])
@@ -146,16 +162,26 @@ class MetaPPOTrainer:
                 surr2 = torch.clamp(ratio, 1-self.eps_clip, 1+self.eps_clip) * advantages[i]
                 
                 # Policy + Value + Entropy Loss
-                loss = -torch.min(surr1, surr2) + 0.5 * self.mse_loss(curr_value, returns[i]) - self.entropy_coef * entropy
+                # Fix broadcasting: curr_value is [1, 1], returns[i] is scalar
+                val_loss = 0.5 * self.mse_loss(curr_value, returns[i].view(1, 1))
+                loss = -torch.min(surr1, surr2) + val_loss - self.entropy_coef * entropy
                 
                 total_loss += loss
                 
+            # [PHASE 2] Stability Metrics
+            with torch.no_grad():
+                avg_entropy = entropy.item() if 'entropy' in locals() else 0.0
+            
             # Step Optimizer
             self.optimizer.zero_grad()
             (total_loss / len(memory)).backward()
+            # [NEW] Gradient Clipping
+            torch.nn.utils.clip_grad_norm_(self.brain.parameters(), max_norm=0.5)
             self.optimizer.step()
+            self.scheduler.step()
+            total_epoch_loss += total_loss.item()
 
-        return total_loss.item() / len(memory)
+        return (total_epoch_loss / (self.k_epochs * len(memory))), avg_entropy
 
 def train_scientist_on_lab(
     num_episodes=50, 

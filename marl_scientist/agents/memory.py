@@ -13,25 +13,49 @@ class TrajectoryMemory:
     def __init__(self, persistence_path: str = "trajectories.pkl"):
         self.store = TrajectoryStore(persistence_path=persistence_path)
 
-    def add(self, result: ExperimentResult):
-        self.store.add_trajectory(result)
+    async def add(self, result: ExperimentResult):
+        await self.store.add_trajectory(result)
 
-    def get_failures(self, config: ExperimentConfig, k: int = 3) -> List[str]:
+    async def get_failures(self, config: ExperimentConfig, k: int = 3) -> List[str]:
         """
         Retrieves summaries of similar experiments that failed.
         """
-        hits = self.store.search_similar(config, k=k*2) # Get more to filter
+        hits = await self.store.search_similar(config, k=k*2) # Get more to filter
         failures = [h["summary"] for h in hits if not h["outcome"]["success"]]
         return failures[:k]
 
-    def check_similarity(self, config: ExperimentConfig, threshold: float = 0.95) -> Optional[Dict[str, Any]]:
+    async def check_similarity(self, config: ExperimentConfig, threshold: float = 0.95) -> Optional[Dict[str, Any]]:
         """
         Check if a proposed config is too similar to a past one.
         """
-        hits = self.store.search_similar(config, k=1)
+        hits = await self.store.search_similar(config, k=1)
         if hits and hits[0]["score"] > threshold:
             return hits[0]
         return None
+
+    async def retrieve_context(self, config: ExperimentConfig, k: int = 3) -> np.ndarray:
+        """
+        Retrieves a pooled latent context vector (768) based on similar past experiments.
+        Useful for feeding into the MetaBrain.
+        """
+        hits = await self.store.search_similar(config, k=k, return_embeddings=True)
+        if not hits:
+            return np.zeros(768, dtype=np.float32)
+            
+        # Weighted average of embeddings based on similarity score
+        embeddings = []
+        weights = []
+        for h in hits:
+            embeddings.append(h["embedding"])
+            # Use softmax-like weighting or just the raw score
+            weights.append(max(0.1, h["score"]))
+            
+        embeddings = np.array(embeddings)
+        weights = np.array(weights).reshape(-1, 1)
+        
+        # Pooled vector
+        context_vec = np.sum(embeddings * weights, axis=0) / np.sum(weights)
+        return context_vec.astype(np.float32)
 
 class EpisodicMemory:
     """

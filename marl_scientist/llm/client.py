@@ -1,7 +1,9 @@
 import requests
+import httpx
 import json
 import numpy as np
 import base64
+import asyncio
 from typing import List, Union, Dict, Any
 
 class LLMClient:
@@ -25,7 +27,7 @@ class LLMClient:
 
     def get_embedding(self, text: str) -> np.ndarray:
         """
-        Get vector embedding for a single text string.
+        Get vector embedding for a single text string (Sync).
         Returns numpy array of shape (D,).
         """
         url = f"{self.base_url}/embeddings"
@@ -44,12 +46,32 @@ class LLMClient:
             embedding = data['data'][0]['embedding']
             return np.array(embedding, dtype=np.float32)
         except Exception as e:
-            # print(f"[LLMClient] Embedding error: {e}")
             raise e
+
+    async def async_get_embedding(self, text: str) -> np.ndarray:
+        """
+        Get vector embedding for a single text string (Async).
+        """
+        url = f"{self.base_url}/embeddings"
+        payload = {
+            "input": text,
+            "model": self.embedding_model
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, headers=self.headers, json=payload, timeout=30.0)
+                response.raise_for_status()
+                data = response.json()
+                embedding = data['data'][0]['embedding']
+                return np.array(embedding, dtype=np.float32)
+            except Exception as e:
+                print(f"[LLMClient] Async embedding error: {e}")
+                raise e
 
     def get_embeddings_batch(self, texts: List[str]) -> np.ndarray:
         """
-        Get embeddings for a list of texts.
+        Get embeddings for a list of texts (Sync).
         Returns numpy array of shape (N, D).
         """
         url = f"{self.base_url}/embeddings"
@@ -78,9 +100,37 @@ class LLMClient:
                  return np.array(result, dtype=np.float32)
             raise e
 
+    async def async_get_embeddings_batch(self, texts: List[str]) -> np.ndarray:
+        """
+        Get embeddings for a list of texts (Async).
+        """
+        url = f"{self.base_url}/embeddings"
+        payload = {
+            "input": texts,
+            "model": self.embedding_model
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, headers=self.headers, json=payload, timeout=120.0)
+                response.raise_for_status()
+                data = response.json()
+                
+                embeddings_list = [item['embedding'] for item in data['data']]
+                return np.array(embeddings_list, dtype=np.float32)
+            except Exception as e:
+                print(f"[LLMClient] Async batch embedding error: {e}")
+                # Simple fallback
+                tasks = [self.async_get_embedding(t) for t in texts]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                valid_results = [r for r in results if not isinstance(r, Exception)]
+                if valid_results:
+                    return np.array(valid_results, dtype=np.float32)
+                raise e
+
     def chat_completion(self, messages: List[Dict[str, str]], temperature=0.7) -> str:
         """
-        Simple chat completion.
+        Simple chat completion (Sync).
         """
         url = f"{self.base_url}/chat/completions"
         payload = {
@@ -99,9 +149,31 @@ class LLMClient:
             print(f"[LLMClient] Chat error: {e}")
             return ""
 
+    async def async_chat_completion(self, messages: List[Dict[str, str]], temperature=0.7) -> str:
+        """
+        Simple chat completion (Async).
+        """
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "messages": messages,
+            "model": self.chat_model,
+            "temperature": temperature,
+            "max_tokens": 1500
+        }
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.post(url, headers=self.headers, json=payload, timeout=60.0)
+                response.raise_for_status()
+                data = response.json()
+                return data['choices'][0]['message']['content']
+            except Exception as e:
+                print(f"[LLMClient] Async chat error: {e}")
+                return ""
+
     def analyze_image(self, image_path: str, prompt: str = "Analyze this image.") -> str:
         """
-        Analyze an image using the Local Vision Model (GLM-4v).
+        Analyze an image using the Local Vision Model (GLM-4v) (Sync).
         """
         try:
             with open(image_path, "rb") as image_file:
@@ -124,22 +196,56 @@ class LLMClient:
                     }
                 ],
                 "max_tokens": 800,
-                "temperature": 0.1 # Low temp for analytical observation
+                "temperature": 0.1 
             }
             
             url = f"{self.base_url}/chat/completions"
             response = requests.post(url, headers=self.headers, json=payload, timeout=60)
-            
-            if response.status_code != 200:
-                print(f"[LLMClient] Vision Error {response.status_code}: {response.text}")
-                return ""
-                
             response.raise_for_status()
             data = response.json()
             return data['choices'][0]['message']['content']
             
         except Exception as e:
             print(f"[LLMClient] Vision failed: {e}")
+            return ""
+
+    async def async_analyze_image(self, image_path: str, prompt: str = "Analyze this image.") -> str:
+        """
+        Analyze an image using the Local Vision Model (GLM-4v) (Async).
+        """
+        try:
+            with open(image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+                
+            payload = {
+                "model": self.chat_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 800,
+                "temperature": 0.1 
+            }
+            
+            url = f"{self.base_url}/chat/completions"
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=self.headers, json=payload, timeout=120.0)
+                response.raise_for_status()
+                data = response.json()
+                return data['choices'][0]['message']['content']
+            
+        except Exception as e:
+            print(f"[LLMClient] Async vision failed: {e}")
             return ""
 
     def check_connection(self) -> bool:
@@ -150,9 +256,6 @@ class LLMClient:
                 model_ids = [m['id'] for m in models]
                 print(f"[LLMClient] Available models: {model_ids}")
                 
-                # Auto-detect logic:
-                # If explicit self.embedding_model is NOT in list, try to find a fallback.
-                # But since user explicitly set it, we trust it or warn.
                 if self.embedding_model not in model_ids:
                      print(f"[LLMClient] WARNING: Configured model {self.embedding_model} not found in {model_ids}")
                 

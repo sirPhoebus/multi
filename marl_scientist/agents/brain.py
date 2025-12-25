@@ -268,19 +268,29 @@ class BrainEncoder:
             "total_timesteps": 30000 
         }
         
+        # [GPU OPTIMIZATION] Architecture selection based on search space
+        # We'll use hp_vals[6] (if available) or a heuristic to pick width
+        width_options = [64, 128, 256, 512]
+        # Since MetaBrain.hp_mean_head output 6 hps, we'll use a deterministic 
+        # mapping or add more heads if needed. For now, let's use the mean of HPs 
+        # to pick a "complexity" level.
+        complexity_idx = int(np.clip((np.mean(hp_vals) + 1) / 2 * len(width_options), 0, len(width_options)-1))
+        width = width_options[complexity_idx]
+        hps["net_arch"] = [width, width]
+        
         # Add algo-specific defaults/scaling
         if algo == "PPO":
-            hps["n_steps"] = int(scale(hp_vals[4], 128, 2048))
-            bs = int(scale(hp_vals[5], 32, 512))
+            hps["n_steps"] = int(scale(hp_vals[4], 128, 4096)) # Increased [2048 -> 4096]
+            bs = int(scale(hp_vals[5], 64, 2048))             # Increased [512 -> 2048]
             hps["batch_size"] = snap_to_pow2(bs)
         elif algo == "DQN":
-            bs = int(scale(hp_vals[4], 32, 256))
+            bs = int(scale(hp_vals[4], 64, 1024))             # Increased [256 -> 1024]
             hps["batch_size"] = snap_to_pow2(bs)
             hps["learning_starts"] = int(scale(hp_vals[5], 100, 5000))
         elif algo == "SAC":
              hps["gradient_steps"] = 1 
              hps["tau"] = float(scale(hp_vals[5], 0.005, 0.05))
-             bs = int(scale(hp_vals[4], 64, 256))
+             bs = int(scale(hp_vals[4], 128, 2048))          # Increased [256 -> 2048]
              hps["batch_size"] = snap_to_pow2(bs)
              hps["total_timesteps"] = 30000 
         

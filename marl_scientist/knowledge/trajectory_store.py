@@ -2,6 +2,7 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 import pickle
+import asyncio
 import os
 from marl_scientist.llm.client import LLMClient
 from marl_scientist.core import ExperimentConfig, ExperimentResult
@@ -20,7 +21,7 @@ class TrajectoryStore:
         self.embeddings: Optional[np.ndarray] = None
         self.load()
 
-    def add_trajectory(self, result: ExperimentResult):
+    async def add_trajectory(self, result: ExperimentResult):
         """
         Summarizes an experiment result, embeds it, and stores it.
         """
@@ -29,7 +30,7 @@ class TrajectoryStore:
         
         # 2. Embed
         try:
-            vector = self.client.get_embedding(summary).reshape(1, -1)
+            vector = (await self.client.async_get_embedding(summary)).reshape(1, -1)
         except Exception as e:
             print(f"[TrajectoryStore] Embedding failed: {e}")
             return
@@ -52,9 +53,9 @@ class TrajectoryStore:
         else:
             self.embeddings = np.vstack([self.embeddings, vector])
 
-        self.save()
+        await asyncio.to_thread(self.save)
 
-    def search_similar(self, config: ExperimentConfig, k: int = 5, return_embeddings: bool = False) -> List[Dict[str, Any]]:
+    async def search_similar(self, config: ExperimentConfig, k: int = 5, return_embeddings: bool = False) -> List[Dict[str, Any]]:
         """
         Finds the top k similar past trajectories.
         If return_embeddings is True, includes the raw embedding vectors.
@@ -65,7 +66,7 @@ class TrajectoryStore:
         try:
             # Get query embedding
             query_text = self._summarize_config(config)
-            query_vec = self.client.get_embedding(query_text).reshape(1, -1)
+            query_vec = (await self.client.async_get_embedding(query_text)).reshape(1, -1)
             
             # Calculate cosine similarities
             stored_embeddings = self.embeddings 
