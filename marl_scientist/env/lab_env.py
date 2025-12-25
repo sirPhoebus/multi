@@ -189,21 +189,24 @@ class LabEnvironment(MetaEnvironment):
         result.stability_score = max(0.0, 1.0 - (std_reward / 50.0))
         
         # 3. Efficiency Score (Speed) (0 to 1)
-        # Normalize relative to 120s limit
-        result.efficiency_score = max(0.0, 1.0 - (result.duration_seconds / 120.0))
+        # Non-linear penalty: sqrt(penalty) makes it gentler initially.
+        duration_ratio = min(1.0, result.duration_seconds / 150.0)
+        result.efficiency_score = max(0.0, 1.0 - np.sqrt(duration_ratio))
         
         # 4. Novelty Score (0 to 1)
         novelty_score = self.novelty_calc.calculate_novelty(result.config)
         
         # --- Weighted Sum ---
         w_perf, w_effic, w_stable = preference
-        w_novelty = 0.2
+        
+        # Give performance a slight boost if it's very high (>0.8)
+        perf_boost = 1.2 if result.performance_score > 0.8 else 1.0
         
         final_meta_reward = (
-            (w_perf * result.performance_score) + 
+            (w_perf * result.performance_score * perf_boost) + 
             (w_effic * result.efficiency_score) + 
             (w_stable * result.stability_score) +
-            (w_novelty * novelty_score)
+            (0.1 * novelty_score) # Reduced novelty weight as swarm matures
         )
         
         return final_meta_reward

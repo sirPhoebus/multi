@@ -31,6 +31,11 @@ class NeuralResearcherAgent(Researcher):
         # [NEW] Multi-Task Preference [Performance, Efficiency, Stability]
         self.preference_vec = np.array([0.5, 0.25, 0.25]) 
         
+        # [NEW] Strategic Intent Persistence
+        self.last_goal = None
+        self.goal_persistence_counter = 0
+        self.max_goal_persistence = 3 # Experiments per goal
+        
         # Recurrent state
         self.hidden_state = None
         self.knowledge_store = None
@@ -109,22 +114,34 @@ class NeuralResearcherAgent(Researcher):
             
             pref_tensor = torch.tensor(self.preference_vec, dtype=torch.float32).unsqueeze(0) # [1, 3]
             
+            # [NEW] Strategic Persistence & Forced Inference
+            intents = ["EXPLORE", "EXPLOIT", "REFINE"]
+            is_persistent = self.last_goal is not None and self.goal_persistence_counter > 0
+            forced_g_idx = self.last_goal if is_persistent else None
+            
             # Forward pass with Context (Hierarchical)
             algo_logits, env_logits, hp_means, value, new_hidden, goal_logits = self.brain(
                 inputs["history"],
                 inputs["trends"],
                 inputs["knowledge"],
                 mem_tensor, 
-                pref_tensor, # [NEW] Preference Injection
-                self.hidden_state
+                pref_tensor, 
+                self.hidden_state,
+                forced_goal=forced_g_idx # [NEW]
             )
             
-            # [NEW] Strategic Logging
-            intents = ["EXPLORE", "EXPLOIT", "REFINE"]
-            goal_idx = torch.argmax(goal_logits, dim=-1).item()
-            intent_str = intents[goal_idx]
-            self.log.info(f"[{self.agent_id}] Strategic Intent: {intent_str}")
-            
+            if is_persistent:
+                goal_idx = self.last_goal
+                self.goal_persistence_counter -= 1
+                intent_str = intents[goal_idx]
+                self.log.info(f"[{self.agent_id}] Strategy Persistent: {intent_str} ({self.goal_persistence_counter} left)")
+            else:
+                goal_idx = torch.argmax(goal_logits, dim=-1).item()
+                intent_str = intents[goal_idx]
+                self.last_goal = goal_idx
+                self.goal_persistence_counter = self.max_goal_persistence - 1
+                self.log.info(f"[{self.agent_id}] New Strategic Intent: {intent_str}")
+                
             # Curriculum Masking
             if allowed_names:
                 mask = torch.full_like(env_logits, -float('inf'))

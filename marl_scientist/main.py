@@ -119,6 +119,9 @@ def main():
                     agent_status[aid] = "IDLE"
                     global_completions += 1
                     
+                    # Log Progress
+                    log.info(f"--- [bold yellow]Progress: {global_completions}/{args.steps}[/bold yellow] (Best: {lab.best_reward:.1f}) ---")
+                    
                     # [NEW] Weight Harvesting Trigger
                     if global_completions % 5 == 0 and len(agents) > 1:
                         # Find Global Best Agent (by recent mean)
@@ -181,7 +184,12 @@ def main():
             # 2. Dispatch from buffer to Lab as long as slots are open
             for _, aid, config in proposal_buffer:
                 if busy_count < max_workers:
-                    log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for 30k steps")
+                    # [NEW] Dynamic Step Budget
+                    continuous_envs = ["Pendulum-v1", "MountainCarContinuous-v0", "LunarLanderContinuous-v2"]
+                    steps = 80000 if config.env_id in continuous_envs else 30000
+                    config.hyperparameters["total_timesteps"] = steps
+                    
+                    log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for {steps//1000}k steps")
                     lab.submit_experiment(aid, config)
                     agent_status[aid] = "BUSY"
                     busy_count += 1

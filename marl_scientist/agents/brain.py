@@ -72,7 +72,8 @@ class MetaBrain(nn.Module):
         knowledge: torch.Tensor,       # (batch, knowledge_dim)
         memory_context: torch.Tensor = None, # (batch, 6)
         preference_vec: torch.Tensor = None, # [NEW] (batch, 3) -> [Perf, Efficiency, Stability]
-        hidden_state: torch.Tensor = None
+        hidden_state: torch.Tensor = None,
+        forced_goal: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
         batch_size = trends.size(0)
@@ -105,7 +106,13 @@ class MetaBrain(nn.Module):
 
         # [NEW] Hierarchical Strategic Step
         goal_logits = self.goal_head(new_hidden)
-        goal_selected = torch.softmax(goal_logits, dim=-1) # soft-conditioning for training
+        
+        if forced_goal is not None:
+            # Force the goal (one-hot)
+            goal_selected = torch.zeros_like(goal_logits, device=goal_logits.device)
+            goal_selected[torch.arange(batch_size), forced_goal] = 1.0
+        else:
+            goal_selected = torch.softmax(goal_logits, dim=-1) # soft-conditioning for training
         
         # Worker Decisions conditioned on Goal
         worker_input = torch.cat([new_hidden, goal_selected], dim=-1)
@@ -158,14 +165,14 @@ class BrainEncoder:
         recent_hist = observation.experiment_history[-self.history_len:]
         
         for res in recent_hist:
-            # Algo One-Hot (4)
+            # Algo One-Hot
             algo_idx = self.ALGOS.index(res.config.algorithm) if res.config.algorithm in self.ALGOS else 0
-            algo_one_hot = np.zeros(4)
+            algo_one_hot = np.zeros(len(self.ALGOS))
             algo_one_hot[algo_idx] = 1.0
             
-            # Env One-Hot (4)
+            # Env One-Hot
             env_idx = self.ENVS.index(res.config.env_id) if res.config.env_id in self.ENVS else 0
-            env_one_hot = np.zeros(4)
+            env_one_hot = np.zeros(len(self.ENVS))
             env_one_hot[env_idx] = 1.0
             
             # Outcome (1)
