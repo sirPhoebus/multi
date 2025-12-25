@@ -23,6 +23,7 @@ class ExperimentResult:
     
     # [NEW] Temporal Metrics
     duration_seconds: float = 0.0
+    start_time: float = 0.0
     total_env_steps: int = 0
     
     final_model_path: Optional[str] = None

@@ -3,6 +3,7 @@ import numpy as np
 from typing import Dict, Any, Optional, List
 from marl_scientist.core import Researcher, Observation, ExperimentConfig, ExperimentResult
 from marl_scientist.agents.brain import MetaBrain, BrainEncoder
+from marl_scientist.agents.memory import EpisodicMemory
 
 class NeuralResearcherAgent(Researcher):
     """
@@ -12,6 +13,7 @@ class NeuralResearcherAgent(Researcher):
     def __init__(self, agent_id: str, model_path: Optional[str] = None):
         self.agent_id = agent_id
         self.encoder = BrainEncoder()
+        self.memory = EpisodicMemory()
         
         # Initialize Brain
         self.brain = MetaBrain()
@@ -87,25 +89,35 @@ class NeuralResearcherAgent(Researcher):
         
         # 3. Brain Inference
         with torch.no_grad():
+            if "allowed_envs" in observation.env_metadata:
+                allowed_names = observation.env_metadata["allowed_envs"]
+            else:
+                allowed_names = [] 
+
+            # [NEW] Memory Retrieval (Context Injection)
+            target_env_context = self.encoder.ENVS[0]
+            if allowed_names:
+                target_env_context = allowed_names[-1] 
+                
+            mem_vec = self.memory.retrieve_vector(target_env_context)
+            mem_tensor = torch.tensor(mem_vec, dtype=torch.float32).unsqueeze(0) # [1, 6]
+            
+            # Forward pass with Context
             algo_logits, env_logits, hp_means, value, new_hidden = self.brain(
                 inputs["history"],
                 inputs["trends"],
                 inputs["knowledge"],
+                mem_tensor, 
                 self.hidden_state
             )
             
-            # [NEW] Curriculum Masking
-            if "allowed_envs" in observation.env_metadata:
-                allowed_names = observation.env_metadata["allowed_envs"]
+            # Curriculum Masking
+            if allowed_names:
                 mask = torch.full_like(env_logits, -float('inf'))
-                
-                # Active Envs indices
                 for name in allowed_names:
                     if name in self.encoder.ENVS:
                         idx = self.encoder.ENVS.index(name)
-                        mask[0, idx] = 0.0 # Unmask
-                
-                # Apply mask
+                        mask[0, idx] = 0.0 
                 env_logits = env_logits + mask
             
             self.hidden_state = new_hidden
@@ -114,28 +126,22 @@ class NeuralResearcherAgent(Researcher):
             env_idx = torch.argmax(env_logits, dim=-1).item()
             selected_env = self.encoder.ENVS[env_idx]
             
-            # 2. Compatibility Masking for Algorithm
-            # Discrete: CartPole, LunarLander, Acrobot
-            # Continuous: Pendulum, MountainCarContinuous
+            # 2. Compatibility Masking
             discrete_envs = ["CartPole-v1", "LunarLander-v3", "Acrobot-v1"]
             continuous_envs = ["Pendulum-v1", "MountainCarContinuous-v0"]
             
             algo_mask = torch.zeros_like(algo_logits)
             
             if selected_env in discrete_envs:
-                # Mask SAC (Index 3 in BrianEncoder.ALGOS=["PPO", "A2C", "DQN", "SAC"])
-                # PPO(0), A2C(1), DQN(2), SAC(3)
                 if "SAC" in self.encoder.ALGOS:
                     sac_idx = self.encoder.ALGOS.index("SAC")
                     algo_mask[0, sac_idx] = -float('inf')
                     
             elif selected_env in continuous_envs:
-                # Mask DQN (Index 2)
                 if "DQN" in self.encoder.ALGOS:
                     dqn_idx = self.encoder.ALGOS.index("DQN")
                     algo_mask[0, dqn_idx] = -float('inf')
             
-            # Apply Algo Mask
             algo_logits = algo_logits + algo_mask
             
             # 3. Select Algorithm
@@ -158,6 +164,9 @@ class NeuralResearcherAgent(Researcher):
         However, it can still publish results to the journal.
         """
         self.best_performance = max(self.best_performance, result.final_mean_reward)
+        
+        # [NEW] Episodic Memory Update
+        self.memory.add(result)
         
         if self.knowledge_store and result.final_mean_reward > 400.0:
             paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
@@ -203,6 +212,11 @@ class NeuralResearcherAgent(Researcher):
             "agent_id": self.agent_id,
             "brain_state": self.brain.state_dict(),
         }, filepath)
+        
+        # [NEW] Save Memory
+        mem_path = filepath.replace(".pkl", "_memory.json")
+        self.memory.save(mem_path)
+        
         print(f"[NeuralResearcher {self.agent_id}] State saved to {filepath}")
 
     def load(self, filepath: str):
@@ -216,6 +230,12 @@ class NeuralResearcherAgent(Researcher):
             checkpoint = torch.load(filepath, weights_only=False)
             self.agent_id = checkpoint.get("agent_id", self.agent_id)
             self.brain.load_state_dict(checkpoint["brain_state"])
+            
+            # [NEW] Load Memory
+            mem_path = filepath.replace(".pkl", "_memory.json")
+            if os.path.exists(mem_path):
+                self.memory.load(mem_path)
+                
             print(f"[NeuralResearcher {self.agent_id}] State loaded from {filepath}")
         except Exception as e:
             print(f"[NeuralResearcher {self.agent_id}] Load failed: {e}")

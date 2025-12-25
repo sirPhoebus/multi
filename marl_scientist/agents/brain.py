@@ -40,7 +40,10 @@ class MetaBrain(nn.Module):
         )
         
         # 4. Fusion & Decision Core
-        self.fusion = nn.Linear(hidden_dim * 3, hidden_dim)
+        # Trends (hidden_dim) + Knowledge (hidden_dim) + RNN (hidden_dim) + [NEW] MemoryContext (6)
+        self.obs_dim = hidden_dim * 3 + 6 
+        
+        self.fusion = nn.Linear(self.obs_dim, hidden_dim)
         self.decision_rnn = nn.GRUCell(hidden_dim, hidden_dim) 
         
         # 5. Policy Heads
@@ -60,21 +63,28 @@ class MetaBrain(nn.Module):
         history_seq: torch.Tensor,     # (batch, seq_len, history_dim)
         trends: torch.Tensor,          # (batch, trend_dim)
         knowledge: torch.Tensor,       # (batch, knowledge_dim)
+        memory_context: torch.Tensor = None, # [NEW] (batch, 6)
         hidden_state: torch.Tensor = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        batch_size = trends.size(0)
         
         # Encoder passes
         if history_seq.shape[1] > 0:
             _, (h_hist, _) = self.history_lstm(history_seq)
             h_hist = h_hist[-1] 
         else:
-            h_hist = torch.zeros(history_seq.shape[0], self.history_lstm.hidden_size, device=history_seq.device)
+            h_hist = torch.zeros(batch_size, self.history_lstm.hidden_size, device=history_seq.device)
             
         h_trends = self.trends_mlp(trends)
         h_know = self.knowledge_mlp(knowledge)
         
+        # Handle Missing Context
+        if memory_context is None:
+            memory_context = torch.zeros(batch_size, 6, device=trends.device)
+        
         # Fusion
-        combined = torch.cat([h_hist, h_trends, h_know], dim=-1)
+        combined = torch.cat([h_hist, h_trends, h_know, memory_context], dim=-1)
         latent = F.relu(self.fusion(combined))
         
         # Session state update

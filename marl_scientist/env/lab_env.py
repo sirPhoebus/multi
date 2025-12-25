@@ -111,6 +111,7 @@ class LabEnvironment(MetaEnvironment):
                 if result:
                     # Success
                     result.duration_seconds = t_end - t_start
+                    result.start_time = t_start
                     # total_env_steps logic handled in result usually, but ensure it's there
                     result.total_env_steps = result.config.hyperparameters.get("total_timesteps", 0)
                     
