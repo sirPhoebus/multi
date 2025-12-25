@@ -270,38 +270,44 @@ Output a JSON object with this schema:
 
 Rules:
 1. "algorithm" must be one of the allowed strings.
-2. "hyperparameters" should include things like "learning_rate", "gamma", "ent_coef", etc. inferred from the text or standard defaults if not specified but implied (e.g. "high exploration" -> high ent_coef).
-3. Do NOT include markdown formatting or comments. JUST VALID JSON.
+2. "hyperparameters" should include things like "learning_rate", "gamma", "ent_coef", etc. inferred from the text.
+3. STRICT JSON only. No comments. No trailing commas.
+4. Use standard float notation (e.g. 0.001), avoid unquoted expressions.
 """
-        try:
-            response = self.client.chat_completion([{"role": "user", "content": prompt}], temperature=0.2)
-            print(f"[DEBUG] Raw LLM Response: {response}")
-            
-            # Sanitization
-            # 1. Strip <think>...</think> blocks if present
-            import re
-            response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-            
-            # 2. Strip markdown code blocks
-            clean_text = response.replace("```json", "").replace("```", "").strip()
-            
-            # 3. Robust JSON extraction (find first { and last })
-            start = clean_text.find("{")
-            end = clean_text.rfind("}")
-            if start != -1 and end != -1:
-                clean_text = clean_text[start:end+1]
-            
-            import json
-            config = json.loads(clean_text)
-            
-            # Simple Validation
-            if "algorithm" not in config or "hyperparameters" not in config:
-                raise ValueError("Missing fields in LLM output")
+        import json
+        import re
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat_completion([{"role": "user", "content": prompt}], temperature=0.2)
                 
-            return config
-        except Exception as e:
-            print(f"[KnowledgeStore] Config synthesis failed: {e}")
-            return None
+                # Sanitization
+                # 1. Strip <think>...</think> blocks if present (Reasoning Models)
+                clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+                
+                # 2. Strip markdown code blocks
+                clean_text = clean_response.replace("```json", "").replace("```", "").strip()
+                
+                # 3. Robust JSON extraction (find first { and last })
+                start = clean_text.find("{")
+                end = clean_text.rfind("}")
+                if start != -1 and end != -1:
+                    clean_text = clean_text[start:end+1]
+                
+                config = json.loads(clean_text)
+                
+                # Simple Validation
+                if "algorithm" not in config or "hyperparameters" not in config:
+                    raise ValueError("Missing fields in LLM output")
+                    
+                return config
+            except Exception as e:
+                print(f"[KnowledgeStore] Attempt {attempt+1}/{max_retries} failed: {e}")
+                if attempt == max_retries - 1:
+                    print(f"[DEBUG] Failed JSON Text: {clean_text if 'clean_text' in locals() else 'N/A'}")
+                    return None
+        return None
 
     def load(self):
         if not os.path.exists(self.persistence_path):

@@ -58,18 +58,25 @@ def main():
             obs = lab.get_observation()
             
             # 2. Agent Action
-            configs = []
+            actions = {}
             for agent in agents:
                 config = agent.propose_experiment(obs)
-                configs.append(config)
+                actions[agent.agent_id] = config
                 log.info(f"Agent {agent.agent_id} proposes: [yellow]{config.algorithm}[/yellow] with lr={config.hyperparameters.get('learning_rate', 'N/A'):.2e}")
                 
             # 3. Environment Step
             log.info("Running experiments (this may take a moment)...")
-            results, rewards = lab.step(configs)
+            results, rewards = lab.step(actions)
             
             # 4. Learning & Safety Check
-            for agent, result, reward in zip(agents, results, rewards):
+            for agent in agents:
+                if agent.agent_id not in results: 
+                    # E.g. agent failed experiment
+                    continue
+                    
+                result = results[agent.agent_id]
+                reward = rewards.get(agent.agent_id, 0.0)
+                
                 log.info(f"Result for {agent.agent_id}: Reward=[bold]{result.final_mean_reward:.2f}[/bold], NoveltyBonus={reward:.2f}")
                 history[agent.agent_id].append(result.final_mean_reward)
                 

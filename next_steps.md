@@ -32,35 +32,20 @@
 - __Current State__: Empty `CausalGraph` class.
 - __Required Improvement__: Implement causal inference (e.g., PC algorithm, neural causal models) to learn relationships like `ent_coef → exploration → final_reward`.
 
-#### __5. Knowledge Integration Not Operational__
+#### __5. Knowledge Integration (DONE)__
 
-- __Current State__: LLM client exists but isn't used in the meta-loop.
+- __Status__: Implemented RAG workflow with `RealKnowledgeStore`.
+- __Mechanism__: Agents query KB, LLM translates papers to JSON configs.
 
-- __Required Improvement__: Use embeddings to:
+#### __6. Parallelization & Efficiency (DONE)__
 
-  - Compare proposed configs against "paper space"
-  - Generate novel combinations inspired by literature
-  - Validate configurations against known failure modes
+- __Status__: Implemented `ProcessPoolExecutor` in `LabEnvironment`.
+- __Performance__: Experiments run concurrently on available cores.
 
-#### __6. Parallelization & Efficiency__
+#### __7. Reward Function Design (DONE)__
 
-- __Current State__: Sequential inner-loop training (5000 timesteps × N agents).
-
-- __Required Improvement__:
-
-  - Parallel experiment execution
-  - Async training with early stopping
-  - Distributed evaluation across multiple benchmarks
-
-#### __7. Reward Function Design__
-
-- __Current State__: Fixed 80% performance + 20% novelty weighting.
-
-- __Required Improvement__:
-
-  - Adaptive weighting based on exploration stage
-  - Include sample efficiency metrics
-  - Penalize unstable configurations
+- __Status__: Implemented Adaptive Meta-Reward.
+- __Mechanism__: Weights shift from Novelty to Performance; Stability penalty included.
 
 #### __8. Missing Meta-Training Loop__
 
