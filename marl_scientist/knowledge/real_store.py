@@ -226,7 +226,7 @@ class RealKnowledgeStore:
         """Create a paper dict from an experiment result."""
         title = f"Optimizing {result.config.algorithm}: {result.final_mean_reward:.0f} pts"
         focus = "Performance Improvement"
-        text = f"{title}. Config: {result.config.hyperparameters}. Agent {agent_id} achieved {result.final_mean_reward} on CartPole."
+        text = f"{title}. Config: {result.config.hyperparameters}. Agent {agent_id} achieved {result.final_mean_reward} on {result.config.env_id}."
         
         return {
             "text": text,
@@ -271,14 +271,16 @@ Paper: "{paper_text}"
 Output a JSON object with this schema:
 {{
   "algorithm": "PPO" | "A2C" | "DQN" | "SAC",
-  "hyperparameters": {{ ... }}
+  "hyperparameters": {{ ... }},
+  "env_id": "CartPole-v1" | "Acrobot-v1" | "Pendulum-v1" | "LunarLander-v3"
 }}
 
 Rules:
 1. "algorithm" must be one of the allowed strings.
-2. "hyperparameters" should include things like "learning_rate", "gamma", "ent_coef", etc. inferred from the text.
-3. STRICT JSON only. No comments. No trailing commas.
-4. Use standard float notation (e.g. 0.001), avoid unquoted expressions.
+2. "env_id" should be inferred from the text if possible (e.g. if it mentions balance/poles, use CartPole; if it mentions landing/moon, use LunarLander). Default to "CartPole-v1" if unsure.
+3. "hyperparameters" should include things like "learning_rate", "gamma", "ent_coef", etc. inferred from the text.
+4. STRICT JSON only. No comments. No trailing commas.
+5. Use standard float notation (e.g. 0.001), avoid unquoted expressions.
 """
         import json
         import re

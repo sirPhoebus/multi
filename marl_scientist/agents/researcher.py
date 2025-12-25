@@ -42,7 +42,7 @@ class ResearcherAgent(Researcher):
         if literature_config:
             # If we found a great paper, maybe try to replicate/improve it
             if random.random() < 0.4: # 40% chance to follow literature
-                 return self._mutate_config(literature_config)
+                 return self._mutate_config(literature_config, observation)
 
         # [NEW] Log Observation Features for debugging/verification
         if observation.performance_trends:
@@ -62,15 +62,16 @@ class ResearcherAgent(Researcher):
         if random.random() < 0.2:
              # Random Exploration (Mutation or totally new random config)
              if random.random() < 0.5:
-                 return self._random_config() # Wide exploration
+                 return self._random_config(observation) # Wide exploration
              else:
-                 return self._mutate_config(self.current_best_config) # Local exploration
+                 return self._mutate_config(self.current_best_config, observation) # Local exploration
         else:
             # "Reasoned" proposal
             new_params = self.causal_model.suggest_improvements(self.current_best_config.hyperparameters)
             return ExperimentConfig(
                 algorithm=self.current_best_config.algorithm,
-                hyperparameters=new_params
+                hyperparameters=new_params,
+                env_id=self.current_best_config.env_id # Keep same env
             )
             
     def update_knowledge(self, result: ExperimentResult):
@@ -103,29 +104,39 @@ class ResearcherAgent(Researcher):
         
         # 1. Contextual Query Generation
         # Analyze recent performance to formulate a query
-        # If we have drops in performance -> "Stability"
-        # If we have plateau -> "Exploration"
-        query = f"Improving {self.current_best_config.algorithm} performance" # Default
+        intent = random.choice(["general", "stability", "exploration", "efficiency"])
         
-        if self.causal_model and len(self.causal_model.history) > 3:
-            recent_rewards = [h['reward'] for h in self.causal_model.history[-3:]]
-            if len(recent_rewards) > 0 and np.std(recent_rewards) > 50: # High variance
-                query = f"Stabilizing {self.current_best_config.algorithm} training"
-            elif len(recent_rewards) > 0 and max(recent_rewards) < 100: # Stuck at low score
-                query = f"Exploration strategies for {self.current_best_config.algorithm}"
+        base_algo = self.current_best_config.algorithm if self.current_best_config else "PPO"
+        
+        if intent == "stability":
+            query = f"Stabilizing {base_algo} training, reducing variance"
+        elif intent == "exploration":
+            query = f"Exploration strategies and entropy bonus for {base_algo}"
+        elif intent == "efficiency":
+            query = f"Sample efficient RL with {base_algo}, faster convergence"
+        else:
+            query = f"Improving {base_algo} performance on control tasks"
+            
+        # Add random flavor keywords to query to force vector search diversity
+        flavor = random.choice(["", "SOTA", "robust", "optimization", "parameters"])
+        if flavor: query += f" {flavor}"
         
         # 2. Search (Local + Journal)
         # We increase k to get more diversity
-        results = self.knowledge_store.search(query, k=3)
+        results = self.knowledge_store.search(query, k=5)
         
         if not results: return None
         
-        # Pick the most relevant paper
-        top_match = results[0]
+        # Probabilistic Selection (Diversity)
+        # Instead of picking [0], we pick from top-3 or top-k with exponentially decreasing probability
+        # Or simple: pick random from top 3
+        selection_idx = min(len(results)-1, random.choices([0, 1, 2], weights=[0.6, 0.3, 0.1])[0])
+        top_match = results[selection_idx]
+        
         meta = top_match['metadata']
         text = top_match['text']
         
-        print(f"Agent {self.agent_id} read paper: '{meta['title']}' (Score: {top_match.get('score', 0):.2f})")
+        print(f"Agent {self.agent_id} read paper ({intent}): '{meta['title']}'")
         
         # 3. Use LLM to Hypothesize a change (RAG)
         # We ask the KnowledgeStore to synthesize a config for us
@@ -152,7 +163,8 @@ class ResearcherAgent(Researcher):
                 
                 return ExperimentConfig(
                     algorithm=llm_config_dict["algorithm"],
-                    hyperparameters=llm_config_dict["hyperparameters"]
+                    hyperparameters=llm_config_dict["hyperparameters"],
+                    env_id=llm_config_dict.get("env_id", self.current_best_config.env_id if self.current_best_config else "CartPole-v1")
                 )
         except Exception as e:
             print(f"Agent {self.agent_id} failed to synthesize config from paper: {e}")
@@ -183,9 +195,22 @@ class ResearcherAgent(Researcher):
              return top_result.config
         return None
 
-    def _random_config(self) -> ExperimentConfig:
+    def _random_config(self, observation: Optional[Observation] = None) -> ExperimentConfig:
         """Generate a completely random valid configuration."""
-        algo = random.choice(["PPO", "A2C", "DQN", "SAC"])
+        # NEW in Step 9: Select Environment first, then algo
+        available_envs = list(observation.env_metadata.keys()) if observation and observation.env_metadata else ["CartPole-v1"]
+        env_id = random.choice(available_envs)
+        
+        # Check env constraints
+        is_continuous = False
+        if observation and env_id in observation.env_metadata:
+             is_continuous = observation.env_metadata[env_id].get("is_continuous", False)
+        
+        if is_continuous:
+             algo = random.choice(["SAC", "PPO", "A2C"])
+        else:
+             algo = random.choice(["PPO", "A2C", "DQN"])
+        
         hp = {}
         
         # Common Params
@@ -247,19 +272,17 @@ class ResearcherAgent(Researcher):
             hp["gradient_steps"] = random.choice([1, 2, 4]) # Steps per update
             hp["ent_coef"] = "auto" 
             
-        # Select Environment (New in Step 9)
-        # We start simple: Randomly choose or stick to CartPole if stable
-        # For now, let's explore diversity
-        env_id = random.choice(["CartPole-v1", "Acrobot-v1"])
-        
+        # Select Environment moved to top of _random_config
         return ExperimentConfig(algorithm=algo, hyperparameters=hp, env_id=env_id)
 
-    def _mutate_config(self, base_config: ExperimentConfig) -> ExperimentConfig:
+    def _mutate_config(self, base_config: ExperimentConfig, observation: Optional[Observation] = None) -> ExperimentConfig:
         """Apply random mutations to hyperparameters or architecture."""
-        
+        if not base_config:
+            return self._random_config(observation)
+            
         # 20% chance to jump to a completely new random config (Increased Exploration)
         if random.random() < 0.2:
-            return self._random_config()
+            return self._random_config(observation)
             
         hp = base_config.hyperparameters.copy()
         
@@ -307,7 +330,8 @@ class ResearcherAgent(Researcher):
                  
         return ExperimentConfig(
             algorithm=base_config.algorithm,
-            hyperparameters=hp
+            hyperparameters=hp,
+            env_id=base_config.env_id # CRITICAL: Propagate env_id
         )
 
     def save(self, filepath: str):

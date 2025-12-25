@@ -5,7 +5,10 @@ __pycache__
 *.log
 *.json
 *.zip
-*.txt
 *.pyc
 saves/*
 marl_scientist.egg-info/*
+test_log.txt
+test_output.txt
+.gitignore
+failed_papers.txt

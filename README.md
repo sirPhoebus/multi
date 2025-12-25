@@ -1,44 +1,82 @@
-# Meta-RL Scientist
+# 🧪 Meta-RL Scientist
 
-**A Closed-Loop Multi-Agent RL Environment for Automated Algorithm Discovery**
+**An Autonomous Multi-Agent RL Research Laboratory**
 
-## Overview
-Meta-RL Scientist is an experimental research environment where "agents" are themselves RL researchers. Their goal is to discover and improve Reinforcement Learning algorithms by proposing configurations, architectures, and loss functions, and verifying them on standard benchmarks.
+Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act as **Reinforcement Learning Researchers**. These agents autonomously read literature, maintain causal models of hyperparameter dynamics, and execute parallel experiments to discover optimal RL configurations.
 
-Unlike purely language-model-based approaches (like "AI Scientist"), this project focuses on **RL-driven evolution**. Agents use Meta-RL and Causal Discovery to learn the dynamics of "what makes an algorithm good," evolving their understanding over time.
+---
 
-## Key Features
+## 🚀 Key Features
 
-- **Agents as Researchers**: Agents observe experiment results and propose new experiments.
-- **The "Lab" Environment**: A meta-environment where actions are experiment configurations (e.g., swappable building blocks like Optimizers, Exploration strategies).
-- **Inner-Loop Verification**: Proposed algorithms are immediately trained and evaluated on lightweight benchmarks (CartPole, Acrobot, MountainCar) using **Stable Baselines3**.
-- **Causal Discovery**: Agents maintain a causal graph of algorithm dynamics (e.g., "Increased entropy coefficient -> Higher exploration -> Better final return").
-- **Novelty Search**: Rewards are based not just on performance, but on the novelty of the proposed configuration in the embedding space.
+### 🧠 Autonomous Researcher Agents
+- **Literature Review (RAG)**: Agents query a local vector database of 100+ research papers to inform their experiment proposals.
+- **Scientific Diversity**: Stochastic intent and probabilistic sampling ensure that agents explore diverse research directions.
+- **Causal Reasoning**: An internal SEM (Structural Equation Model) engine allows agents to learn *why* specific parameters (like entropy coefficients or clipping ranges) impact performance.
+- **Journaling**: High-performing discoveries are "published" back to the shared knowledge journal, enabling social learning.
 
-## Architecture
+### 🔬 The Laboratory Environment
+- **Multi-Benchmark Suite**:
+    - **Discrete**: `CartPole-v1`, `Acrobot-v1`, `LunarLander-v3`.
+    - **Continuous**: `Pendulum-v1` (with full SAC support).
+- **Parallel Execution**: Multi-processing runner achieves significant speedups by executing experiments in isolated subprocesses.
+- **Resource Hardening**: Built-in environment cleanup and compatible-algorithm guarding prevent systemic failures and memory leaks.
 
-- **Core Engine**: Stable Baselines3 (SB3) for reliable, fast inner-loop training.
-- **Action Space**: Configuration Hot-Swapping (JSON-based selection of hyperparameters and modules).
-- **Safety**: "Singularity Monitor" to detect and throttle reward hacking or runaway resource usage.
+### 📈 Adaptive Meta-Reward
+- **Multi-Objective Optimization**: Agents are rewarded for high final return, novelty of approach, and training stability.
+- **Stability Penalty**: Discourages brittle, high-variance hyperparameter configurations.
 
-## Installation
+---
 
+## 🛠️ Architecture
+
+```mermaid
+graph TD
+    A[Researcher Agents] -->|Propose Config| B(The Lab)
+    B -->|Parallel Run| C[SB3 Workers]
+    C -->|Results| D[Metrics Engine]
+    D -->|Reward + Obs| A
+    A -->|Consult| E[Knowledge Store]
+    E <-->|RAG| F[Vector DB]
+    D -->|Journaling| E
+```
+
+---
+
+## ⚡ Quick Start
+
+### Installation
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/meta-rl-scientist.git
 
-# Install dependencies
+# Install dependencies (requires Gymnasium, SB3, Scikit-learn)
 pip install -e .
 ```
 
-## Usage
+### Running the Simulation
+```bash
+# Start a multi-agent simulation for 10 meta-steps
+python marl_scientist/main.py --steps 10 --num-agents 4
+```
 
-*Coming Soon*
+### Monitoring
+- **Logs**: Detailed tracebacks and experiment statuses are written to `simulation.log`.
+- **Knowledge**: Scientific papers and discovered configurations are persisted in `kb_embeddings.pkl`.
 
-## Roadmap
+---
 
-- [ ] Core Environment Harness (The "Lab")
-- [ ] Researcher Agent Implementation (Recurrent Policy)
-- [ ] Integration of Stable Baselines3 Runners
-- [ ] Causal Discovery Module
-- [ ] Meta-RL Training Loop
+## 🛠️ Requirements
+- **Gymnasium** + `stable-baselines3`
+- **LM Studio** / **Local LLM**: (Defaulting to `glm-4v-flash` and `nomic-embed`)
+- **Python 3.10+**
+
+---
+
+## 🗺️ Roadmap
+- [x] Multi-Process Parallelization
+- [x] RAG-Informed Research Strategy
+- [x] Continuous Action Space Support
+- [x] Causal Discovery Integration
+- [ ] Multi-Agent Competitive Meta-Training
+- [ ] Vision-based Atari Benchmarks
+- [ ] Dynamic Loss Function Synthesis

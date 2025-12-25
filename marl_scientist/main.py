@@ -19,7 +19,7 @@ def main():
     log.info("[bold green]=== Initializing Meta-RL Scientist Lab ===[/bold green]")
     
     # 1. Setup Environment
-    lab = LabEnvironment(authorized_benchmarks=["CartPole-v1"])
+    lab = LabEnvironment(authorized_benchmarks=["CartPole-v1", "Acrobot-v1", "Pendulum-v1"])
     
     # [NEW] Real Knowledge Base integration
     from marl_scientist.knowledge.real_store import RealKnowledgeStore

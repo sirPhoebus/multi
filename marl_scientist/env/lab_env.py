@@ -6,20 +6,41 @@ from marl_scientist.core import MetaEnvironment, ExperimentConfig, ExperimentRes
 from marl_scientist.evaluation.sb3_runner import SB3ExperimentRunner
 from marl_scientist.evaluation.metrics import NoveltyCalculator
 from marl_scientist.evaluation.parallel_runner import run_experiment_task
+from marl_scientist.utils.logger import setup_logger
 
 class LabEnvironment(MetaEnvironment):
     """
     The 'Lab' where Researcher Agents submit their experiment configurations.
     """
     def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"]):
+        self.log = setup_logger()
         self.benchmarks = authorized_benchmarks
-        # We assume CartPole for now
+        # Cache metadata for benchmarks
+        self.env_metadata = {b: self._get_env_metadata(b) for b in self.benchmarks}
+        
+        # We assume first benchmark for simple runner init
         self.runner = SB3ExperimentRunner(benchmark_env_id=self.benchmarks[0])
         self.novelty_calc = NoveltyCalculator()
         self.history: List[ExperimentResult] = []
         self.best_reward = -float('inf')
         self.best_config = None
         self.step_counter = 0
+        
+    def _get_env_metadata(self, env_id: str) -> Dict[str, Any]:
+        """Extracts observation and action space info from gymnasium."""
+        try:
+            temp_env = gym.make(env_id)
+            meta = {
+                "env_id": env_id,
+                "observation_space_type": str(type(temp_env.observation_space).__name__),
+                "action_space_type": str(type(temp_env.action_space).__name__),
+                "is_discrete": isinstance(temp_env.action_space, gym.spaces.Discrete),
+                "is_continuous": isinstance(temp_env.action_space, gym.spaces.Box),
+            }
+            temp_env.close()
+            return meta
+        except Exception as e:
+            return {"env_id": env_id, "error": str(e)}
         
     def step(self, actions: Dict[str, ExperimentConfig]) -> Tuple[Dict[str, ExperimentResult], Dict[str, float]]:
         """
@@ -42,22 +63,22 @@ class LabEnvironment(MetaEnvironment):
         # Determine max workers
         max_workers = min(len(actions), 8)
         
-        print(f"[Lab] Submitting {len(actions)} experiments to pool (workers={max_workers})...")
+        self.log.info(f"[Lab] Submitting {len(actions)} experiments to pool (workers={max_workers})...")
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             for agent_id, config in actions.items():
-                print(f"[Lab] Scheduling {agent_id}...")
+                self.log.info(f"[Lab] Scheduling {agent_id} on {config.env_id} ({config.algorithm})...")
                 futures.append(executor.submit(run_experiment_task, config, agent_id))
             
             # Collect results
-            print(f"[Lab] Waiting for completion...")
+            self.log.info(f"[Lab] Waiting for completion...")
             for future in as_completed(futures):
                 a_id, result, error = future.result()
                 if result:
                     results_map[a_id] = result
-                    print(f"[Lab] {a_id} finished: {result.final_mean_reward:.1f}")
+                    self.log.info(f"[Lab] {a_id} finished: {result.final_mean_reward:.1f}")
                 else:
-                    print(f"[Lab] {a_id} FAILED: {error}")
+                    self.log.error(f"[Lab] {a_id} FAILED: {error}")
                     # Handle failure gracefully?
                     pass
 
@@ -152,5 +173,6 @@ class LabEnvironment(MetaEnvironment):
             experiment_history=self.history,
             performance_trends=trends,
             novelty_landscape=novelty_stats,
-            knowledge_summary=know_summary
+            knowledge_summary=know_summary,
+            env_metadata=self.env_metadata
         )

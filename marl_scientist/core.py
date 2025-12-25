@@ -28,6 +28,7 @@ class Observation:
     performance_trends: Dict[str, float]  # e.g., "improvement_rate", "stability"
     novelty_landscape: Dict[str, float]   # e.g., "unexplored_ratio", "cluster_density"
     knowledge_summary: str                # Text summary of related papers
+    env_metadata: Dict[str, Any] = dataclasses.field(default_factory=dict) # Metadata for each benchmark
     # In the future: current_causal_graph: Any
     # In the future: paper_embeddings: np.ndarray
 
