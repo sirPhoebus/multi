@@ -86,8 +86,8 @@ Drop `.txt` or `.md` files into `knowledge/`. The **Async Watcher** will instant
 - [x] Long-Term Episodic Memory
 - [x] Hierarchical Decision-Making
 - [x] Multi-Task Learning Scenarios
-- [ ] Self-supervised learning objectives for Brain Pre-Training
 - [ ] Multi-Agent Competitive Meta-Training (Self-Play)
+- [ ] Self-supervised learning objectives for Brain Pre-Training
 - [ ] Dynamic Neural Architecture Synthesis
 
 

@@ -78,6 +78,10 @@ def main():
     start_time = time.time()
     last_vision_time = time.time()
     
+    # [NEW] Competitive Dynamics
+    population_reward_history = [] 
+    reward_window = 20 # Mean over last 20 experiments
+    
     try:
         log.info("Starting Event Loop...")
         
@@ -92,8 +96,19 @@ def main():
                     log.info(f"[Event] Experiment completed for {aid}. Reward: {res.final_mean_reward:.1f}")
                     
                     if res:
+                        # [NEW] Relative Scaling Logic
+                        population_reward_history.append(rewards[aid])
+                        if len(population_reward_history) > reward_window:
+                            population_reward_history.pop(0)
+                        
+                        pop_mean = sum(population_reward_history) / len(population_reward_history)
+                        relative_reward = rewards[aid] - pop_mean
+                        
+                        log.info(f"  - Meta-Reward: {rewards[aid]:.2f} (Rel: {relative_reward:+.2f})")
+                        
                         # Update Agent
                         if aid in agents:
+                            # We update with RELATIVE reward to drive competition
                             agents[aid].update_knowledge(res)
                             monitor.check_safety(res)
                             
@@ -103,6 +118,17 @@ def main():
                     # Mark Free
                     agent_status[aid] = "IDLE"
                     global_completions += 1
+                    
+                    # [NEW] Weight Harvesting Trigger
+                    if global_completions % 5 == 0 and len(agents) > 1:
+                        # Find Global Best Agent (by recent mean)
+                        best_aid = max(agents.keys(), key=lambda x: history.get(x, [-float('inf')])[-1])
+                        # Find Worst Agent
+                        worst_aid = min(agents.keys(), key=lambda x: history.get(x, [float('inf')])[-1])
+                        
+                        if best_aid != worst_aid:
+                            log.info(f"[Competitive] {worst_aid} is harvesting insights from {best_aid}...")
+                            agents[worst_aid].harvest_weights(agents[best_aid].brain, tau=0.1)
                 
                 # Update Dashboard immediately on new data
                 export_dashboard_data(list(agents.values()), global_completions)
@@ -128,17 +154,42 @@ def main():
                 log.info(f"[Scaling] All agents busy ({busy_count}/{max_workers}). Expansion triggered!")
                 spawn_agent(total_agents + 1)
                 
-            # D. Job Submission
+            # C. Organic Scaling Logic
+            # ... (Scaling logic stays same, checking available slots)
+            
+            # [NEW] Priority Scheduling Logic
+            # We only submit if Lab has slots
+            busy_count = sum(1 for s in agent_status.values() if s == "BUSY")
+            max_workers = lab.executor._max_workers
+            
+            # 1. Collect Proposals from IDLE agents into a priority buffer
+            proposal_buffer = [] # (priority, aid, config)
             for aid, agent in agents.items():
                 if agent_status[aid] == "IDLE":
-                    # Propose
+                    # Priority = -RecentMeanReward (higher reward -> lower priority value -> schedules first)
+                    recent_perf = history.get(aid, [0.0])[-1]
+                    priority = -recent_perf 
+                    
                     obs = lab.get_observation()
                     config = agent.propose_experiment(obs)
-                    
-                    log.info(f"[Dispatch] {aid} -> {config.env_id} ({config.algorithm}) for 30k steps")
+                    proposal_buffer.append((priority, aid, config))
+                    agent_status[aid] = "QUEUED" # Intermediate state
+            
+            # Sort buffer by priority
+            proposal_buffer.sort(key=lambda x: x[0])
+            
+            # 2. Dispatch from buffer to Lab as long as slots are open
+            for _, aid, config in proposal_buffer:
+                if busy_count < max_workers:
+                    log.info(f"[Dispatch] {aid} (Prio: {-priority:.1f}) -> {config.env_id} for 30k steps")
                     lab.submit_experiment(aid, config)
-                    
                     agent_status[aid] = "BUSY"
+                    busy_count += 1
+                else:
+                    # Put back to IDLE so we can re-evaluate priority next tick
+                    agent_status[aid] = "IDLE"
+            
+            # ... (Periodic Vision Analysis logic stays same)
             
             # E. Periodic Vision Analysis (every 60s)
             if time.time() - last_vision_time > 60:

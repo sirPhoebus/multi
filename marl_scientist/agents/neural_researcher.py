@@ -186,6 +186,18 @@ class NeuralResearcherAgent(Researcher):
             paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
             self.knowledge_store.add_paper(paper)
 
+    def harvest_weights(self, competitor_brain: MetaBrain, tau: float = 0.1):
+        """
+        Soft-copy weights from a successful competitor.
+        L_new = (1 - tau) * L_old + tau * L_competitor
+        """
+        with torch.no_grad():
+            for target_param, source_param in zip(self.brain.parameters(), competitor_brain.parameters()):
+                target_param.data.copy_(
+                    target_param.data * (1.0 - tau) + source_param.data * tau
+                )
+        print(f"[NeuralResearcher {self.agent_id}] Harvested weights from competitor (tau={tau})")
+
     def _get_knowledge_embedding(self, observation: Observation) -> np.ndarray:
         """
         Fetches the top paper embedding from the knowledge store.
