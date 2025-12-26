@@ -225,13 +225,25 @@ class Simulation:
         export_dashboard_data(list(self.agents.values()), self.global_completions)
 
     def trigger_harvesting(self):
+        # [NEW] Harvesting Limit
+        if not hasattr(self, 'harvest_counts'):
+            self.harvest_counts = {} # (source, target) -> count
+
         try:
             best_aid = max(self.agents.keys(), key=lambda x: self.history.get(x, [-float('inf')])[-1])
             worst_aid = min(self.agents.keys(), key=lambda x: self.history.get(x, [float('inf')])[-1])
             
             if best_aid != worst_aid:
+                # Check limit
+                pair_key = (best_aid, worst_aid)
+                count = self.harvest_counts.get(pair_key, 0)
+                if count >= 3:
+                     self.log.info(f"[Competitive] Harvesting Limit reached for {worst_aid} -> {best_aid}. Skipping.")
+                     return
+
                 self.log.info(f"[Competitive] {worst_aid} is harvesting insights from {best_aid}...")
                 self.agents[worst_aid].harvest_weights(self.agents[best_aid].brain, tau=0.1)
+                self.harvest_counts[pair_key] = count + 1
         except ValueError:
             pass
 
@@ -255,6 +267,18 @@ class Simulation:
         busy_count = sum(c for c in self.active_counts.values())
         max_workers = self.lab.executor._max_workers
         
+        # [MULTI-TASK] Diversity Round Tracking
+        if not hasattr(self, 'diversity_counter'):
+             self.diversity_counter = 0
+             
+        # Increment counter roughly every "batch" of dispatches. 
+        # Since this runs in a loop, we increment if we actually dispatch something or just periodically.
+        # Let's count "dispatch events" roughly.
+        self.diversity_counter += 1
+        is_diversity_round = (self.diversity_counter % 20 == 0) # Every ~20 ticks/dispatches
+        if is_diversity_round:
+             self.log.info("[MultiTask] Diversity Round Active! Forcing environment mixing.")
+
         proposal_buffer = []
         for aid, agent in self.agents.items():
             if self.active_counts[aid] == 0:
@@ -281,11 +305,15 @@ class Simulation:
         for _, aid, config, train_data in proposal_buffer:
             if busy_count < max_workers:
                 # Process proposal
-                if not self.process_proposal(aid, config, elite_aids):
+                if not self.process_proposal(aid, config, elite_aids, is_diversity_round):
                     continue
                 
                 self.log.info(f"[Dispatch] {aid} -> {config.env_id} for {config.hyperparameters.get('total_timesteps', 0)//1000}k steps")
                 
+                # [LOGGING] Dump hyperparameters for correlation
+                hp_log = {k: v for k, v in config.hyperparameters.items() if k not in ['sub_id', 'parent_agent']}
+                self.log.info(f"  - Params: {hp_log}")
+
                 sub_id = config.hyperparameters.get("sub_id", aid)
                 # [PHASE 2] Store train data
                 if train_data:
@@ -304,7 +332,7 @@ class Simulation:
             else:
                 self.active_counts[aid] = 0
 
-    def process_proposal(self, aid: str, config: Any, elite_aids: List[str]) -> bool:
+    def process_proposal(self, aid: str, config: Any, elite_aids: List[str], diversity_mode: bool = False) -> bool:
         unlocked_envs = self.lab.tiers[self.lab.tier]
         
         is_valid, violations = self.validator.validate(config)
@@ -313,25 +341,38 @@ class Simulation:
             self.active_counts[aid] = 0
             return False
 
+        # [MULTI-TASK] Environment Mixing
+        # Top-3 Elites stay on hardest tasks (Pioneer Bias)
         if aid in elite_aids:
             if config.env_id not in unlocked_envs:
                 old_env = config.env_id
                 config.env_id = random.choice(unlocked_envs)
                 self.log.info(f"[Pioneer] Mandatory Redirection for Top-3 Elite {aid} from {old_env} to {config.env_id}!")
-            
-            env_meta = self.lab.env_metadata.get(config.env_id, {})
-            if env_meta.get("is_continuous") and config.algorithm == "DQN":
-                config.algorithm = "SAC"
-                self.log.info(f"  - Algorithm adjusted to {config.algorithm} for Continuous compatibility.")
-            elif env_meta.get("is_discrete") and config.algorithm == "SAC":
-                config.algorithm = "PPO"
-                self.log.info(f"  - Algorithm adjusted to {config.algorithm} for Discrete compatibility.")
+        else:
+            # Non-Elites: Mix tasks
+            # 1. Diversity Round -> Force random unlocked env
+            # 2. Random 30% chance -> Force random unlocked env (Exploration/Positive Signal)
+            if diversity_mode or random.random() < 0.30:
+                # Pick any unlocked environment (including easier ones from lower tiers)
+                all_allowed = self.lab.allowed_envs
+                old_env = config.env_id
+                config.env_id = random.choice(all_allowed)
+                if old_env != config.env_id:
+                     self.log.info(f"[MultiTask] {aid} redirected {old_env} -> {config.env_id} for Generalization.")
+
+        # Compatibility Checks (Algo vs Env)
+        env_meta = self.lab.env_metadata.get(config.env_id, {})
+        if env_meta.get("is_continuous") and config.algorithm == "DQN":
+            config.algorithm = "SAC"
+            self.log.info(f"  - Algorithm adjusted to {config.algorithm} for Continuous compatibility.")
+        elif env_meta.get("is_discrete") and config.algorithm == "SAC":
+            config.algorithm = "PPO"
+            self.log.info(f"  - Algorithm adjusted to {config.algorithm} for Discrete compatibility.")
 
         # Step Budget
         steps_map = {
-            "CartPole-v1": 30000,
-            "Pendulum-v1": 500000, # Increased for Refinement
-            "Acrobot-v1": 100000,
+            "CartPole-v1": 50000, 
+            "Pendulum-v1": 100000, 
             "Acrobot-v1": 100000,
             "LunarLander-v3": 200000,
             "MountainCarContinuous-v0": 300000,
@@ -342,13 +383,23 @@ class Simulation:
         
         # [DYNAMIC BUDGET] MountainCar Optimization
         if config.env_id == "MountainCarContinuous-v0":
+            # [OVERRIDE] Metric-driven switch to TD3 (more robust for this env)
+            config.algorithm = "TD3"
+
             agent = self.agents.get(aid)
             mastery = agent.competency_scores.get(config.env_id, -100.0) if agent else -100.0
+            
+            # Boost budget for exploration
             if mastery < -10.0:
-                config.hyperparameters["total_timesteps"] = 150000
-                self.log.info(f"  - [DynamicBudget] Setting conservative budget (150k) for MountainCar.")
-            else:
                 config.hyperparameters["total_timesteps"] = 300000
+                self.log.info(f"  - [DynamicBudget] Setting conservative budget (300k) for MountainCar + TD3 Override.")
+            else:
+                config.hyperparameters["total_timesteps"] = 500000
+                self.log.info(f"  - [DynamicBudget] Setting robust budget (500k) for MountainCar + TD3 Override.")
+            
+            # Ensure off-policy params are efficient
+            if "learning_starts" not in config.hyperparameters:
+                 config.hyperparameters["learning_starts"] = 1000
         else:
             config.hyperparameters["total_timesteps"] = steps_map.get(config.env_id, 50000)
         

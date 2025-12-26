@@ -1,7 +1,9 @@
+
 from typing import Dict, Any, Tuple
 import gymnasium as gym
 import torch.nn as nn
-from stable_baselines3 import PPO, A2C, DQN, SAC
+from stable_baselines3 import PPO, A2C, DQN, SAC, TD3
+from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.evaluation import evaluate_policy
 import numpy as np
 import time
@@ -65,7 +67,7 @@ class SB3ExperimentRunner:
                              hp["n_steps"] = new_n_steps
                              # print(f"[SB3Runner] Adjusted n_steps {n_steps} -> {new_n_steps} for batch_size {bs}")
                          
-                 elif config.algorithm in ["DQN", "SAC"]:
+                 elif config.algorithm in ["DQN", "SAC", "TD3"]:
                      # Off-policy uses explicit buffer_size
                      pass
 
@@ -80,9 +82,6 @@ class SB3ExperimentRunner:
                 elif act_fn_name == "Tanh": policy_kwargs["activation_fn"] = nn.Tanh
                 elif act_fn_name == "ELU": policy_kwargs["activation_fn"] = nn.ELU
                 elif act_fn_name == "LeakyReLU": policy_kwargs["activation_fn"] = nn.LeakyReLU
-            
-            # Common SB3 Params that might need filtering per algo
-            # We construct a dictionary of valid args
             
             # Common SB3 Params that might need filtering per algo
             # We construct a dictionary of valid args
@@ -104,8 +103,8 @@ class SB3ExperimentRunner:
                 for key in ["gae_lambda", "ent_coef", "vf_coef", "max_grad_norm", "n_steps", "batch_size"]:
                     if key in hp: algo_kwargs[key] = hp.pop(key)
                     
-            # Off-Policy Params (DQN, SAC)
-            if config.algorithm in ["DQN", "SAC"]:
+            # Off-Policy Params (DQN, SAC, TD3)
+            if config.algorithm in ["DQN", "SAC", "TD3"]:
                 for key in ["buffer_size", "learning_starts", "batch_size", "tau", "train_freq", "gradient_steps"]:
                     if key in hp: algo_kwargs[key] = hp.pop(key)
 
@@ -120,7 +119,7 @@ class SB3ExperimentRunner:
                 
                 # Guard: DQN only supports Discrete action spaces
                 if not isinstance(env.action_space, gym.spaces.Discrete):
-                     raise ValueError(f"DQN does not support action space {env.action_space}. Use PPO/A2C/SAC for Continuous environments.")
+                     raise ValueError(f"DQN does not support action space {env.action_space}. Use PPO/A2C/SAC/TD3 for Continuous environments.")
             
             elif config.algorithm == "SAC":
                 # Guard: SAC only supports Box (Continuous) action spaces
@@ -128,7 +127,16 @@ class SB3ExperimentRunner:
                     raise ValueError(f"SAC does not support action space {env.action_space}. Use PPO/DQN/A2C for Discrete environments.")
                 
                 if "ent_coef" in hp: algo_kwargs["ent_coef"] = hp.pop("ent_coef")
-                
+            
+            elif config.algorithm == "TD3":
+                # TD3 Needs Action Noise
+                if isinstance(env.action_space, gym.spaces.Box):
+                    n_actions = env.action_space.shape[0]
+                    action_noise = NormalActionNoise(mean=np.zeros(n_actions), sigma=0.1 * np.ones(n_actions))
+                    algo_kwargs["action_noise"] = action_noise
+                else:
+                    raise ValueError("TD3 requires a continuous action space (Box).")
+
             # 3. Instantiate Model
             model = algo_class(
                 policy="MlpPolicy",
@@ -199,8 +207,8 @@ class SB3ExperimentRunner:
             total_timesteps = hp.get("total_timesteps", 10000)
             model.learn(total_timesteps=total_timesteps, callback=callbacks)
             
-            # 5. Evaluate Final
-            mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=5)
+            # 5. Evaluate Final (Best-of-N)
+            mean_reward, std_reward = evaluate_policy(model, env, n_eval_episodes=10)
             
             # [PHASE 4] Stagnation Penalty
             if stagnation_callback.stopped_early:
@@ -266,4 +274,6 @@ class SB3ExperimentRunner:
         if algo_name == "A2C": return A2C
         if algo_name == "DQN": return DQN
         if algo_name == "SAC": return SAC
+        if algo_name == "TD3": return TD3
         raise ValueError(f"Unknown algorithm: {algo_name}")
+

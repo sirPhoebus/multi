@@ -185,6 +185,12 @@ class NeuralResearcherAgent(Researcher):
                 self.log.info(f"[{self.agent_id}] Strategy Persistent: {intents[goal_idx]} ({self.goal_persistence_counter} left)")
             else:
                 goal_idx = torch.argmax(goal_logits, dim=-1).item()
+                
+                # [EXPLORATION] Occasional Override
+                if random.random() < 0.10:
+                    goal_idx = 0 # Force EXPLORE
+                    self.log.info(f"[{self.agent_id}] Strategy Override: Forcing EXPLORE for diversity!")
+                
                 self.last_goal = goal_idx
                 self.goal_persistence_counter = self.max_goal_persistence - 1
                 self.log.info(f"[{self.agent_id}] New Strategic Intent: {intents[goal_idx]}")

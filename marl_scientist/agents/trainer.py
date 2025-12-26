@@ -19,7 +19,7 @@ class MetaPPOTrainer:
         gamma=0.99, 
         eps_clip=0.2, 
         k_epochs=4,
-        entropy_coef=0.01
+        entropy_coef=0.05
     ):
         self.brain = brain
         self.optimizer = optim.Adam(self.brain.parameters(), lr=lr)

@@ -245,6 +245,13 @@ class LabEnvironment(MetaEnvironment):
             (w_stable * result.stability_score) +
             (0.1 * novelty_score) # Reduced novelty weight as swarm matures
         )
+
+        # [NEW] Absolute Performance Bonus (Scale-agnostic boost)
+        # We rely on the normalized performance_score (0-1) to be the "absolute" signal.
+        # But we boost it significantly if it's a hard environment or high tier.
+        # For now, let's just make sure we don't add raw reward which breaks multi-task comparison.
+        abs_bonus = result.performance_score * 0.5 
+        final_meta_reward += abs_bonus
         
         return final_meta_reward
 
