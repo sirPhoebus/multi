@@ -137,9 +137,16 @@ class SB3ExperimentRunner:
                 else:
                     raise ValueError("TD3 requires a continuous action space (Box).")
 
+            # [NEW] Architectural Search: Load Custom Policy if provided
+            policy_type = "MlpPolicy"
+            if "policy_code" in hp:
+                custom_policy = self._load_custom_policy(hp.pop("policy_code"), hp)
+                if custom_policy:
+                    policy_type = custom_policy
+
             # 3. Instantiate Model
             model = algo_class(
-                policy="MlpPolicy",
+                policy=policy_type,
                 env=env,
                 verbose=0,
                 policy_kwargs=policy_kwargs if policy_kwargs else None,
@@ -276,4 +283,22 @@ class SB3ExperimentRunner:
         if algo_name == "SAC": return SAC
         if algo_name == "TD3": return TD3
         raise ValueError(f"Unknown algorithm: {algo_name}")
+
+    def _load_custom_policy(self, code: str, hp: Dict[str, Any]):
+        """Dynamically loads a custom SB3 policy class from code."""
+        from stable_baselines3.common.policies import BasePolicy
+        import torch
+        import torch.nn as nn
+        
+        local_scope = {}
+        try:
+            exec(code, {"torch": torch, "nn": nn, "BasePolicy": BasePolicy}, local_scope)
+            for name, obj in local_scope.items():
+                if isinstance(obj, type) and issubclass(obj, BasePolicy) and obj is not BasePolicy:
+                    return obj
+            print("[SB3Runner] No subclass of BasePolicy found in custom code.")
+            return None
+        except Exception as e:
+            print(f"[SB3Runner] Error loading custom policy: {e}")
+            return None
 

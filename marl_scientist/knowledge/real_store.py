@@ -205,6 +205,23 @@ class RealKnowledgeStore:
         except Exception as e:
              print(f"[KnowledgeStore] Failed to publish paper: {e}")
 
+    async def add_insight(self, insight: str, agent_id: str, tags: List[str] = None):
+        """
+        Add a short insight or observation to the journal.
+        """
+        meta = {
+            "title": f"Insight from {agent_id}",
+            "author": agent_id,
+            "type": "insight",
+            "tags": tags or [],
+            "ingested_at": str(time.time()) if 'time' in globals() else "0"
+        }
+        paper = {
+            "text": insight,
+            "metadata": meta
+        }
+        await self.add_paper(paper)
+
     async def search_journal(self, query: str, k: int = 3) -> List[Dict[str, Any]]:
         if self.journal_embeddings is None:
             return []
@@ -399,6 +416,9 @@ class KnowledgeShard:
 
     async def add_paper(self, paper: Dict[str, Any]):
         return await self.parent_store.add_paper(paper)
+
+    async def add_insight(self, insight: str, agent_id: str, tags: List[str] = None):
+        return await self.parent_store.add_insight(insight, agent_id, tags)
         
     async def search(self, query: str, k: int = 3):
         # 1. Local Search

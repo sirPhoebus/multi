@@ -8,9 +8,10 @@ class ExperimentConfig:
     
     Represents a configuration for an RL training run.
     """
-    algorithm: str  # "PPO", "A2C", "DQN"
+    algorithm: str  # "PPO", "A2C", "DQN", "LLM-Zero-Shot"
     hyperparameters: Dict[str, Union[float, int, str]]
-    env_id: str = "CartPole-v1" # Default env
+    env_id: str = "CartPole-v1" # Default env or Task ID
+    domain: str = "rl" # "rl", "coding", "reasoning", "vision"
     # Future: architecture_graph: Dict...
 
 @dataclasses.dataclass

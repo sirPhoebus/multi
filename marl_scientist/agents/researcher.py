@@ -4,6 +4,10 @@ import numpy as np
 import dataclasses
 from marl_scientist.core import Researcher, Observation, ExperimentConfig, ExperimentResult
 from marl_scientist.agents.causal_graph import CausalDiscoveryEngine
+from marl_scientist.llm.client import LLMClient
+import re
+
+from marl_scientist.utils.logger import setup_logger
 
 class ResearcherAgent(Researcher):
     """
@@ -11,8 +15,10 @@ class ResearcherAgent(Researcher):
     Uses Causal Discovery to learn algorithm dynamics.
     """
     
-    def __init__(self, agent_id: str):
+    def __init__(self, agent_id: str, knowledge_store: Optional[Any] = None, trajectory_memory: Optional[Any] = None):
         self.agent_id = agent_id
+        self.knowledge_store = knowledge_store
+        self.trajectory_memory = trajectory_memory
         # "Scientific Beliefs" - current best known config
         self.current_best_config = ExperimentConfig(
             algorithm="PPO",
@@ -25,11 +31,20 @@ class ResearcherAgent(Researcher):
             }
         )
         self.best_performance = -float('inf')
-        self.best_performance = -float('inf')
         self.causal_model = CausalDiscoveryEngine()
-        self.knowledge_store = None # Injected later
-        self.trajectory_memory = None # Injected later
+        self.log = setup_logger()
         self.validator = None # [PHASE 2]
+        
+        # [NEW] LLM for Skills
+        self.llm = LLMClient()
+        self.llm_available = False # Will check on first use or init
+        # Lazy check to avoid blocking init
+        # if self.llm.check_connection(): self.llm_available = True
+        
+        # [NEW] Meta-Learning Competencies
+        # domain -> score (0.0 to 1.0)
+        self.competence = {"rl": 0.1, "coding": 0.1} 
+        self.competence_alpha = 0.1 # Learning rate for competence
         
     def set_knowledge_store(self, store):
         self.knowledge_store = store
@@ -40,19 +55,26 @@ class ResearcherAgent(Researcher):
     def set_validator(self, validator):
         self.validator = validator
         
-    def propose_experiment(self, observation: Observation) -> ExperimentConfig:
+    async def propose_experiment(self, observation: Observation) -> ExperimentConfig:
         """
-        Decide what to try next.
+        Decide what to try next using a hypothesis-driven approach.
         """
-        # 1. Literature Review: Check the shared knowledge base
-        literature_config = self._review_literature()
-        if literature_config:
-            # If we found a great paper, maybe try to replicate/improve it
-            if random.random() < 0.4: # 40% chance to follow literature
-                 return self._mutate_config(literature_config, observation)
+        # 1. Literature Review & Context Gathering
+        context = await self._gather_context(observation)
+        
+        # 2. Generate Hypothesis
+        hypothesis = await self._generate_hypothesis(observation, context)
+        self.log.info(f"[Agent {self.agent_id}] Hypothesis: {hypothesis}")
+        
+        # 3. Translate Hypothesis to Experiment
+        proposal = await self._translate_hypothesis_to_experiment(hypothesis, observation)
+        
+        if not proposal:
+             # Fallback to mutation if translation fails
+             return self._mutate_config(self.current_best_config, observation)
 
         # [NEW] Log Observation Features for debugging/verification
-        if observation.performance_trends:
+        if observation and observation.performance_trends:
              pt = observation.performance_trends
              nl = observation.novelty_landscape
              # print(f"[Agent {self.agent_id}] Obs: Trend={pt.get('improvement_rate',0):.2f}, Stability={pt.get('stability',0):.2f}, Explored={nl.get('explored_ratio',0):.2f}")
@@ -63,52 +85,124 @@ class ResearcherAgent(Researcher):
              # Adopt peer's strategy as new baseline if it's much better
              # (In a real system, we'd verify it first)
              self.current_best_config = best_peer_config
+             
+        # [NEW] Meta-Strategy for Domain Selection
+        # Use Epsilon-Greedy or Softmax on self.competence to pick 'target_domain'
+        target_domain = self._select_target_domain()
+        
+        # Filter available envs by target_domain
+        available_envs = []
+        if observation and observation.env_metadata:
+            for eid, meta in observation.env_metadata.items():
+                if meta.get("domain", "rl") == target_domain:
+                    available_envs.append(eid)
+        
+        # If no envs for target domain, fallback to all
+        if not available_envs:
+             available_envs = list(observation.env_metadata.keys()) if (observation and observation.env_metadata) else ["CartPole-v1"]
 
-        # 3. Causal Reasoning: Use internal model to improve current config
-        # Epsilon-greedy: data gathering vs exploitation
-        exploration_rate = 0.3 # Increased from 0.2
-        if random.random() < exploration_rate:
-             # Random Exploration (Mutation or totally new random config)
-             if random.random() < 0.4:
-                 return self._random_config(observation) # Wide exploration
-             else:
-                 return self._mutate_config(self.current_best_config, observation) # Local exploration (can switch env)
-        else:
-            # "Reasoned" proposal
-            new_params = self.causal_model.suggest_improvements(self.current_best_config.hyperparameters)
-            
-            # Occasionally switch environment even in reasoned mode to explore new frontiers
-            # This prevents sticking to CartPole forever just because it hit 500
-            env_id = self.current_best_config.env_id
-            if random.random() < 0.15: # 15% chance to try this algo on a new environment
-                 available_envs = list(observation.env_metadata.keys()) if (observation and observation.env_metadata) else ["CartPole-v1"]
-                 env_id = random.choice(available_envs)
-            
-            
-            proposal = ExperimentConfig(
-                algorithm=self.current_best_config.algorithm,
-                hyperparameters=new_params,
-                env_id=env_id
+        # Pick random env for now (we could pick best known for that domain if we tracked it)
+        env_id = random.choice(available_envs)
+        
+        if proposal:
+             # Ensure the proposal uses an env from the target domain if possible
+             if proposal.env_id not in available_envs and available_envs:
+                 proposal.env_id = random.choice(available_envs)
+             
+             # If it's coding, we still favor the dedicated generator for now, 
+             # but we could merge them.
+             if target_domain == "coding":
+                  return self._generate_code_solution(proposal.env_id, observation), {}
+                  
+             return proposal, {}
+
+        return self._mutate_config(self.current_best_config, observation), {}
+
+    async def _gather_context(self, observation: Observation) -> str:
+        """Gathers literature and peer results into a context string."""
+        context = "Recent peer results:\n"
+        best_peer = self._check_peer_results(observation)
+        if best_peer:
+            context += f"- Peer found success with {best_peer.algorithm} on {best_peer.env_id}\n"
+        
+        lit_hits = await self._review_literature_hits()
+        if lit_hits:
+            context += "\nRelevant literature:\n"
+            for h in lit_hits:
+                context += f"- {h['metadata']['title']}: {h['text'][:200]}...\n"
+        
+        return context
+
+    async def _generate_hypothesis(self, observation: Observation, context: str) -> str:
+        """Uses LLM to generate a natural language hypothesis."""
+        prompt = f"""
+You are a Lead RL Researcher. Based on the following context and current state, propose a specific, testable hypothesis.
+
+Current Best Config: {self.current_best_config}
+Performance: {self.best_performance:.1f}
+Context:
+{context}
+
+Format your response as: "Hypothesis: [Your single-sentence hypothesis]"
+Encourage innovation: If performance is plateauing, suggest structural changes (e.g., "Use a Transformer-based policy", "Add a larger recurrent memory", "Use an ensemble of models").
+"""
+        try:
+            response = await self.llm.async_chat_completion([{"role": "user", "content": prompt}])
+            return response.strip()
+        except:
+            return "Hypothesis: Increasing exploration will improve performance in sparse-reward environments."
+
+    async def _translate_hypothesis_to_experiment(self, hypothesis: str, observation: Observation) -> ExperimentConfig:
+        """Translates an NL hypothesis into a concrete ExperimentConfig."""
+        # For simplicity, we use the existing RAG-style synthesis logic or similar LLM call
+        prompt = f"""
+Translate the following hypothesis into a concrete experiment configuration.
+
+Hypothesis: {hypothesis}
+Target Domain: {observation.env_metadata.get(observation.env_id, {}).get("domain", "rl")}
+
+Output a JSON object:
+{{
+  "algorithm": "PPO" | "A2C" | "DQN" | "SAC" | "TD3" | "DCC",
+  "hyperparameters": {{ 
+      ... ,
+      "policy_code": "[Optional] For RL: Python code for a custom Stable Baselines3 Policy class",
+      "model_code": "[Optional] For Vision: Python code for a custom PyTorch nn.Module class named 'CustomModel'"
+  }},
+  "env_id": "CartPole-v1" | "Acrobot-v1" | "Pendulum-v1" | "LunarLander-v3" | "MountainCarContinuous-v0" | "CIFAR100-Task-0" | ... 
+}}
+
+Rules for code generation:
+1. RL: Must inherit from `BasePolicy` or `ActorCriticPolicy`.
+2. Vision: Must inherit from `nn.Module` and be named `CustomModel`.
+3. Provide ONLY the code string inside the JSON value.
+"""
+        import json
+        try:
+            response = await self.llm.async_chat_completion([{"role": "user", "content": prompt}])
+            # Basic cleanup (similar to KnowledgeStore logic)
+            clean_json = re.search(r"\{.*\}", response, re.DOTALL).group(0)
+            data = json.loads(clean_json)
+            return ExperimentConfig(
+                algorithm=data["algorithm"],
+                hyperparameters=data["hyperparameters"],
+                env_id=data.get("env_id", "CartPole-v1")
             )
-            
-            # [PHASE 2] Self-Correction via Validator
-            if self.validator:
-                valid, violations = self.validator.validate(proposal)
-                if not valid:
-                    # If invalid, mutate it again or try random as fallback
-                    # print(f"[Agent {self.agent_id}] Symbolic violation found: {violations}. Self-correcting...")
-                    return self._mutate_config(proposal, observation)
+        except:
+             return None
 
-            # [PHASE 1] Basic De-duplication
-            if self.trajectory_memory:
-                similar = self.trajectory_memory.check_similarity(proposal, threshold=0.96)
-                if similar and not similar["outcome"]["success"]:
-                    # print(f"[Agent {self.agent_id}] Proposal rejected (Too similar to failure). Mutating...")
-                    return self._mutate_config(proposal, observation)
+    def propose_system_change(self) -> Optional[Dict]:
+        """[SELf-MODIFICATION] Propose a change to the simulation parameters."""
+        if self.best_performance < 400: # Only elites propose changes
+            return None
             
-            return proposal
+        return {
+            "target": "update_interval",
+            "value": 20,
+            "reason": "Stable performance allows for larger update batches."
+        }
             
-    def update_knowledge(self, result: ExperimentResult):
+    async def update_knowledge(self, result: ExperimentResult):
         """
         Learn from the result.
         """
@@ -119,9 +213,20 @@ class ResearcherAgent(Researcher):
             result.final_mean_reward
         )
         
+        # [NEW] Update Competence
+        domain = result.config.domain
+        score = result.performance_score # Normalized 0-1
+        
+        current = self.competence.get(domain, 0.1)
+        # Exponential moving average
+        new_competence = current + self.competence_alpha * (score - current)
+        self.competence[domain] = new_competence
+        
+        # print(f"[Agent {self.agent_id}] Updated {domain} competence to {new_competence:.2f} (Rollout: {score:.2f})")
+        
         # [PHASE 1] Trajectory Compression
         if self.trajectory_memory:
-            self.trajectory_memory.add(result)
+            await self.trajectory_memory.add(result)
         
         # Update Best Known
         if result.final_mean_reward > self.best_performance:
@@ -133,9 +238,19 @@ class ResearcherAgent(Researcher):
             # We remove the hardcoded 300.0 CartPole bias.
             if self.knowledge_store:
                 paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
-                self.knowledge_store.add_paper(paper)
+                await self.knowledge_store.add_paper(paper)
+                
+                # [NEW] Add a concise insight
+                insight = f"Agent {self.agent_id} optimized {result.config.algorithm} on {result.config.env_id} achieving {result.final_mean_reward:.1f}. Key params: {result.config.hyperparameters}"
+                await self.knowledge_store.add_insight(insight, self.agent_id)
 
-    def _review_literature(self) -> Optional[ExperimentConfig]:
+    async def _review_literature_hits(self) -> List[Dict]:
+        """Internal helper for context gathering."""
+        if not self.knowledge_store: return []
+        query = f"Optimizing {self.current_best_config.algorithm} performance"
+        return await self.knowledge_store.search(query, k=3)
+
+    async def _review_literature(self) -> Optional[ExperimentConfig]:
         """
         Consults the agent's shard of the Knowledge Base.
         """
@@ -251,11 +366,33 @@ class ResearcherAgent(Researcher):
         available_envs = list(observation.env_metadata.keys()) if observation and observation.env_metadata else ["CartPole-v1"]
         env_id = random.choice(available_envs)
         
-        # Check env constraints
-        is_continuous = False
         if observation and env_id in observation.env_metadata:
-             is_continuous = observation.env_metadata[env_id].get("is_continuous", False)
+             meta = observation.env_metadata[env_id]
+             domain = meta.get("domain", "rl")
+             is_continuous = meta.get("is_continuous", False)
         
+        if domain == "coding":
+            return self._generate_code_solution(env_id, observation)
+        
+        if domain == "vision":
+             # Generate DCC Hyperparameters
+             hp = {
+                 "fast_lr": random.choice([1e-3, 5e-4, 1e-4]),
+                 "slow_lr": random.choice([1e-3, 5e-4, 1e-4]),
+                 "fast_weight": random.choice([0.5, 0.7, 0.9]),
+                 "batch_size": random.choice([64, 128]),
+                 "epochs": random.choice([5, 10]), # Short for lab
+                 "input_dim": 3072,
+                 "hidden_dim": random.choice([256, 512, 1024])
+             }
+             hp["slow_weight"] = 1.0 - hp["fast_weight"]
+             
+             # 50% chance to design a custom architecture instead of tuning DCC
+             if self.competence.get("vision", 0) > 0.3 and random.random() < 0.5:
+                 return self._generate_architecture_proposal(env_id, observation)
+                 
+             return ExperimentConfig(algorithm="DCC", hyperparameters=hp, env_id=env_id, domain="vision")
+             
         if is_continuous:
              algo = random.choice(["SAC", "PPO", "A2C"])
         else:
@@ -332,6 +469,11 @@ class ResearcherAgent(Researcher):
             
         # 20% chance to jump to a completely new random config (Increased Exploration)
         if random.random() < 0.2:
+            return self._random_config(observation)
+            
+        if base_config.domain == "coding":
+            # For coding, 'mutation' currently just means retry with valid syntax (random)
+            # Future: Perturb code string
             return self._random_config(observation)
             
         hp = base_config.hyperparameters.copy()
@@ -429,3 +571,147 @@ class ResearcherAgent(Researcher):
             print(f"[Agent {self.agent_id}] State loaded. Best Reward: {self.best_performance:.1f}")
         except Exception as e:
             print(f"[Agent {self.agent_id}] Failed to load state: {e}")
+
+    def _select_target_domain(self) -> str:
+        """Selects a domain to work on based on competence and curiosity."""
+        # Simple Epsilon-Greedy for now
+        # 20% explore random domain
+        # 80% exploit high competence (or inverse if we want to improve weak skills?)
+        # Let's say we want to IMPROVE weak skills? Or specialize?
+        # The prompt says 'discover diverse skills'. So we should balance.
+        # Let's use proportional sampling (Softmax-ish) but inverted?
+        # Actually, let's just pick the one with highest potential or random.
+        
+        domains = list(self.competence.keys())
+        if not domains: return "rl"
+        
+        if random.random() < 0.3:
+             return random.choice(domains)
+        else:
+             # Pick best domain (Specialization)
+             # return max(self.competence, key=self.competence.get)
+             
+             # Pick domain with moderate competence (Curriculum - not too easy, not too hard?)
+             # For now, just random weighted by competence?
+             return random.choices(domains, weights=[self.competence[d] + 0.1 for d in domains])[0]
+
+    def _generate_code_solution(self, task_id: str, observation: Observation) -> ExperimentConfig:
+        """Uses LLM to generate a Python solution for a coding task."""
+        
+        # 1. Get task description if available
+        desc = "Write a python function named 'solution'."
+        if observation and observation.env_metadata and task_id in observation.env_metadata:
+             desc = observation.env_metadata[task_id].get("description", desc)
+        
+        prompt = f"""You are an expert Python programmer.
+Task: {desc}
+
+You must write a valid Python function named `solution`.
+Return ONLY the python code code block. Do not explain.
+"""
+        
+        # Fallback if no LLM
+        # if not self.llm_available: # We could check this, but let's try calling it
+        #    pass 
+            
+        try:
+             # We assume self.llm is available or will handle connection errors gracefully
+             response = self.llm.chat_completion([
+                 {"role": "system", "content": "You are a concise python coding assistant."},
+                 {"role": "user", "content": prompt}
+             ], temperature=0.7)
+             
+             if not response:
+                 raise Exception("Empty LLM response")
+                 
+             # Extract code from markdown blocks if present
+             code = response
+             if "```python" in response:
+                 code = response.split("```python")[1].split("```")[0].strip()
+             elif "```" in response:
+                 code = response.split("```")[1].split("```")[0].strip()
+                 
+             # Safety: Ensure 'def solution' is in there
+             if "def solution" not in code:
+                  code = f"def solution(x):\n    # LLM failed to define solution\n    return x\n\n# Raw Output:\n# {code}"
+
+        except Exception as e:
+             # print(f"[Agent {self.agent_id}] LLM Code Gen Failed: {e}")
+             # Fallback
+             code = "def solution(x):\n    return x # Empty Fallback"
+        
+        return ExperimentConfig(
+            algorithm="PythonScript", 
+            hyperparameters={"code": code},
+            env_id=task_id,
+            domain="coding"
+        )
+
+    def _generate_architecture_proposal(self, task_id: str, observation: Observation) -> ExperimentConfig:
+        """
+        Designing a Neural Architecture for Vision.
+        Recursive Self-Improvement Step 1: Modifying the compute structure.
+        """
+        system_prompt = (
+            "You are an AI Architect designing a PyTorch Vision Model.\n"
+            "Task: Create a neural network class named 'CustomModel' inheriting from nn.Module.\n"
+            "Input: Flattened CIFAR-100 image (size 3072).\n"
+            "Output: Class logits (size 5).\n"
+            "Constraints:\n"
+            "- Must accept an optional `hp` dict in __init__.\n"
+            "- Must use standard PyTorch.\n"
+            "- Be creative: use skip connections, dense blocks, or attention if useful.\n"
+            "- Return ONLY the Python code block."
+        )
+        
+        user_prompt = f"Design a model for task {task_id}. Make it better than a simple MLP."
+        
+        try:
+            response = self.llm.chat_completion([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ], temperature=0.7)
+        except Exception as e:
+            print(f"LLM Architecture Gen failed: {e}")
+            return ExperimentConfig(algorithm="DCC", hyperparameters={}, env_id=task_id, domain="vision")
+
+        # Parsing code
+        code_block = ""
+        import re
+        
+        # 1. Clean <think> tags from the raw response first
+        # This prevents the fallback from picking up reasoning text
+        clean_response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+        
+        # 2. Try Regex on cleaned response - harvest ALL blocks
+        blocks = re.findall(r"```\s*python(.*?)```", clean_response, re.DOTALL | re.IGNORECASE)
+        if not blocks:
+            # Try generic blocks
+            blocks = re.findall(r"```(.*?)```", clean_response, re.DOTALL)
+            # Filter generic blocks to remove non-python (heuristic)
+            blocks = [b[6:].strip() if b.strip().startswith("python") else b.strip() for b in blocks]
+        
+        if blocks:
+            code_block = "\n\n".join(blocks)
+        else:
+            code_block = ""
+        
+        if not code_block:
+             # Fallback: if no code blocks, but looks like code, use the cleaned text
+             if "class " in clean_response and "nn.Module" in clean_response:
+                 code_block = clean_response
+             else:
+                 return ExperimentConfig(algorithm="DCC", hyperparameters={}, env_id=task_id, domain="vision")
+
+
+        return ExperimentConfig(
+             algorithm="NAS", # Neural Architecture Search
+             hyperparameters={
+                 "model_code": code_block,
+                 "lr": 1e-3,
+                 "epochs": 5
+             },
+             env_id=task_id,
+             domain="vision"
+        ) 
+

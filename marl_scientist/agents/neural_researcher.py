@@ -10,7 +10,9 @@ from marl_scientist.agents.brain import MetaBrain, BrainEncoder
 from marl_scientist.agents.memory import EpisodicMemory, TrajectoryMemory
 from marl_scientist.utils.logger import setup_logger
 
-class NeuralResearcherAgent(Researcher):
+from marl_scientist.agents.researcher import ResearcherAgent
+
+class NeuralResearcherAgent(ResearcherAgent):
     """
     An AI Scientist that uses a Neural Network 'Brain' to decide experiments.
     Learns how to do research over time.
@@ -19,7 +21,7 @@ class NeuralResearcherAgent(Researcher):
                  knowledge_store: Optional[Any] = None, 
                  trajectory_memory: Optional[TrajectoryMemory] = None,
                  validator: Optional[Any] = None):
-        self.agent_id = agent_id
+        super().__init__(agent_id, knowledge_store, trajectory_memory)
         self.encoder = BrainEncoder()
         self.memory = EpisodicMemory()
         self.log = setup_logger()
@@ -46,10 +48,6 @@ class NeuralResearcherAgent(Researcher):
         
         # Recurrent state
         self.hidden_state = None
-        self.knowledge_store = knowledge_store
-        self.trajectory_memory = trajectory_memory
-        
-        # [PHASE 4] Horizon Mode State
         self.horizon_active = False
         self.horizon_buffer: List[ExperimentConfig] = []
         self.horizon_results: List[ExperimentResult] = []
@@ -263,6 +261,13 @@ class NeuralResearcherAgent(Researcher):
         entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1).item()
         
         if intents[goal_idx] == "EXPLORE" and entropy > 0.8 and not self.horizon_active:
+            # 30% chance to use LLM Slow Reasoning, 70% Horizon Mode
+            if random.random() < 0.3:
+                self.log.info(f"[{self.agent_id}] High Uncertainty (H={entropy:.2f}). Triggering Slow Reasoning (LLM Hypothesis)!")
+                llm_config, _ = await super().propose_experiment(observation)
+                if llm_config:
+                    return llm_config, train_data
+
             self.log.info(f"[{self.agent_id}] High Uncertainty (H={entropy:.2f}). Triggering Horizon Mode Lite!")
             self.horizon_active = True
             
@@ -285,11 +290,18 @@ class NeuralResearcherAgent(Researcher):
 
         return config, train_data
 
+    def propose_system_change(self) -> Optional[Dict]:
+        """Supports the new self-modification mechanism."""
+        if self.best_performance < 400:
+            return None
+        return {
+            "target": "update_interval",
+            "value": 20,
+            "reason": "Neural convergence suggests higher batch size."
+        }
+
     async def update_knowledge(self, result: ExperimentResult):
-        """
-        Neural agent doesn't do manual causal updates, 
-        it learns via the PPO meta-training loop. (Async)
-        """
+        """Neural agent learns via meta-loop and hypothesis-driven insights."""
         # [PHASE 4] Handle Horizon Results
         if result.config.hyperparameters.get("is_horizon"):
             self.horizon_results.append(result)
@@ -298,8 +310,9 @@ class NeuralResearcherAgent(Researcher):
                 self.horizon_active = False
             return 
 
-        self.best_performance = max(self.best_performance, result.final_mean_reward)
-        
+        # [PHASE 1] Base class handles insights, causal updates, and trajectory memory
+        await super().update_knowledge(result)
+
         # [PHASE 4] Curriculum Mastery Update
         env_id = result.config.env_id
         old_comp = self.competency_scores.get(env_id, -1000.0)
@@ -308,14 +321,8 @@ class NeuralResearcherAgent(Researcher):
         if result.final_mean_reward > old_comp + 1.0:
             self.log.info(f"[{self.agent_id}] New Mastery Level on {env_id}: {result.final_mean_reward:.1f}")
         
+        # Episodic Memory for Brain Encoding
         self.memory.add(result)
-        
-        if self.trajectory_memory:
-            await self.trajectory_memory.add(result)
-        
-        if self.knowledge_store and result.final_mean_reward > 400.0:
-            paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
-            await self.knowledge_store.add_paper(paper)
 
     def harvest_weights(self, competitor_brain: MetaBrain, tau: float = 0.1):
         """

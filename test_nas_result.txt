@@ -1,0 +1,6 @@
+Algorithm: NAS
+Code Length: 1349
+Reward: 0.0
+Performance: 0.0
+Metrics: {'error': 1.0}
+CWD: C:\repo\agent\multi

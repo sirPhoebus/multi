@@ -137,11 +137,12 @@ class LLMClient:
             "messages": messages,
             "model": self.chat_model,
             "temperature": temperature,
-            "max_tokens": 1500
+            "max_tokens": 4096
         }
         
         try:
-            response = requests.post(url, headers=self.headers, json=payload, timeout=30)
+            # Increased timeout for longer NAS generation
+            response = requests.post(url, headers=self.headers, json=payload, timeout=300)
             response.raise_for_status()
             data = response.json()
             return data['choices'][0]['message']['content']
@@ -158,7 +159,7 @@ class LLMClient:
             "messages": messages,
             "model": self.chat_model,
             "temperature": temperature,
-            "max_tokens": 1500
+            "max_tokens": 4096
         }
         
         async with httpx.AsyncClient() as client:

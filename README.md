@@ -8,10 +8,27 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
 
 ## 🚀 Key Features
 
-### 🧠 Neural "Brain" Architecture
-- **Sequence-Aware Model**: Researcher Agents use an **LSTM-based RNN** to process the sequence of past experiments.
-- **Meta-PPO Training**: The "Scientist Brain" is optimized using Meta-Reinforcement Learning (PPO) to maximize discovery efficiency.
-- **Multimodal State**: Inputs include performance trends, novelty landscapes, knowledge embeddings, and temporal metrics.
+### 🧠 Hybrid Reasoning Architecture
+- **Dual-Process Theory**: Agents combine **"Fast" Neural decision-making** (RNN-driven) for tactical optimization with **"Slow" LLM Reasoning** (Hypothesis-driven) for strategic pivots.
+- **LLM-Driven Hypotheses**: High-uncertainty states trigger a "Reasoning Loop" where agents gather context from literature and peer success and use an LLM to generate testable natural-language hypotheses.
+- **Natural Language Translation**: LLMs translate hypotheses into concrete, valid `ExperimentConfig` structures.
+
+### 📚 Centralized Knowledge & Shared Journal
+- **Dynamic Insight Logging**: After successful experiments, agents publish concise, natural-language "Insights" to a shared journal.
+- **Peer-to-Peer Learning**: All agents can semantically search the journal, allowing discoveries (e.g., "higher learning rate works better on LunarLander") to propagate instantly across the swarm.
+- **Literature Integration**: Real-time integration of research papers via a vector-backed `KnowledgeStore`.
+
+### 🏗️ Neural Architecture Search (NAS)
+- **Generative Design**: Agents now propose entire model architectures by generating custom PyTorch and Stable Baselines3 policy code.
+- **Dynamic Runners**: The Vision and RL runners support on-the-fly execution of dynamic, LLM-generated code strings, enabling the swarm to design its own neural structures.
+
+### 🛠️ Self-Modification Support
+- **System Tuning**: Elite agents can propose and apply changes to simulation-level parameters (e.g., `update_interval`), allowing the lab to adapt its own meta-parameters based on current performance.
+- **Automated Refinement**: The lab environment evolves its dispatching and resource allocation strategies based on agent feedback.
+
+### 🐝 Swarm Dynamics
+- **Leaderboard**: Real-time ranking of agents by meta-reward and efficiency.
+- **Competitive Harvesting**: Successful agents share weights and insights with those falling behind, maintaining high population diversity.
 
 ### 🎓 Self-Paced Curriculum
 - **Tiered Progression**: Agents start on simple tasks and unlock harder ones only after proving proficiency.
@@ -19,10 +36,6 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
     - **Tier 1**: `LunarLander-v3`, `Acrobot-v1`
     - **Tier 2**: `MountainCarContinuous-v0`
 - **Auto-Promotion**: The entire lab advances when *any* agent solves the current tier, fostering swarm collaboration.
-
-### 🐝 Swarm Dynamics
-- **Leaderboard**: Real-time ranking of agents by meta-reward and efficiency.
-- **Resource Allocation**: Top performers receive **Bonus Experiment Slots**, accelerating their research.
 
 ### 💾 Long-Term Episodic Memory
 - **Experiment Persistence**: Agents store and retrieve successful experiment configurations to initialize new search processes.
@@ -55,17 +68,20 @@ Meta-RL Scientist is a sophisticated, closed-loop simulation where AI agents act
 
 ```mermaid
 graph TD
-    A[Neural Researchers] -->|Propose| G(Symbolic Guard)
-    G -->|Validate| B(The Lab)
-    G -->|Reject & Correct| A
+    A[Neural Researchers] -->|High Uncertainty| LLM[LLM Reasoning Loop]
+    LLM -->|Hypothesis| A
+    A -->|Propose Experiment| G(Symbolic Guard)
+    A -->|Propose System Change| S[Simulation Controller]
+    S -->|Apply Mods| A
+    S -->|Adjust Params| G
+    G -->|Validate & Correct| B(The Lab)
     B -->|Check Tier| B1{Allowed?}
-    B1 -->|Yes| C[SB3 Workers]
-    B1 -->|No| A[Penalty]
+    B1 -->|Yes| C[Custom Model Runners]
     C -->|Results| D[Metrics Engine]
-    D -->|Reward| A
-    D -->|Trajectory| F[Trajectory Store]
-    A -->|Consult| E[Knowledge Store]
-    A <-->|Recall| F
+    D -->|Internal Reward| A
+    D -->|New Insight| J[Shared Journal]
+    A -->|Consult Literature| E[Knowledge Store]
+    A -->|Semantic Search| J
 ```
 
 ---
@@ -78,10 +94,10 @@ pip install -e .
 pip install watchdog
 ```
 
-### Running the Neural Scientist
+### Running the Scientist
 ```bash
-# Start a 4-agent simulation with different "Scientist Profiles"
-python marl_scientist/main.py --agent-type neural --num-agents 4 --steps 20
+# Start a hybrid simulation with 2 agents
+python marl_scientist/main.py --agent-type neural --num-agents 2 --steps 10
 ```
 
 ### Adding New Knowledge
@@ -97,10 +113,12 @@ Drop `.txt` or `.md` files into `knowledge/`. The **Async Watcher** will instant
 - [x] Curriculum Learning (Tiers, Auto-Promotion)
 - [x] Long-Term Episodic Memory
 - [x] Hierarchical Decision-Making
-- [x] Multi-Task Learning Scenarios
-- [x] Multi-Agent Competitive Meta-Training (Self-Play)
 - [x] Trajectory Vector Compression (D3 Engine Phase 1)
 - [x] Symbolic Verification Layer (D3 Engine Phase 2)
 - [x] Async-First Engine (Async LLM, Async Knowledge Store)
 - [x] Active/Latent Agent Brain Split (D3 Engine Phase 3)
-- [ ] Dynamic Neural Architecture Synthesis
+- [x] Hybrid Reasoning (Fast Neural + Slow LLM)
+- [x] Centralized Insight Logging (Shared Journal)
+- [x] Dynamic Neural Architecture Synthesis (Vision & RL)
+- [x] Agent-Driven Self-Modification
+- [ ] Agent-Authored Lab Curriculum

@@ -1,3 +1,4 @@
+
 from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import gymnasium as gym
@@ -14,64 +15,49 @@ class LabEnvironment(MetaEnvironment):
     """
     def __init__(self, authorized_benchmarks: List[str] = ["CartPole-v1"], max_workers: int = 8, visual: bool = False):
         self.log = setup_logger()
+        from marl_scientist.env.domains import RLDomain, CodingDomain, VisionDomain
+        
+        self.domains = [RLDomain(), CodingDomain(), VisionDomain()]
+        self.domain_map = {} # env_id -> domain_obj
+        
         self.benchmarks = authorized_benchmarks
         self.visual = visual
-        # Cache metadata for benchmarks
-        self.env_metadata = {b: self._get_env_metadata(b) for b in self.benchmarks}
         
-        # We assume first benchmark for simple runner init
-        self.runner = SB3ExperimentRunner(benchmark_env_id=self.benchmarks[0])
-        self.novelty_calc = NoveltyCalculator()
-        self.history: List[ExperimentResult] = []
-        self.best_reward = -float('inf')
-        self.best_config = None
-        self.step_counter = 0
-        
-        # [NEW] Curriculum Tiers
-        self.tier = 0
-        self.tiers = {
-            0: ["CartPole-v1", "Pendulum-v1"],
-            1: ["LunarLander-v3", "Acrobot-v1"],
-            2: ["MountainCarContinuous-v0"],
-            3: ["Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"]
-        }
-        # Threshold to UNLOCK next tier
-        self.tier_thresholds = {
-            0: 450.0, # CartPole/Pendulum solved
-            1: 200.0, # LunarLander solved
-            2: 90.0,  # MountainCar solved (or progressed)
-            3: float('inf')
-        }
-    
         # [NEW] Async Executor
         self.executor = ProcessPoolExecutor(max_workers=max_workers)
         self.futures_map = {} # future -> (agent_id, start_time)
         self.running_experiments = {} # agent_id -> config
         
-        # [NEW] Global Benchmark Metadata for Dispatch Logic
+        # State Initialization
+        self.novelty_calc = NoveltyCalculator()
+        self.history = []
+        self.best_reward = -float('inf')
+        self.best_config = None
+        self.step_counter = 0
+        # [NEW] Promotion Logic Data
+        self.tiers = {
+            0: ["CartPole-v1", "Pendulum-v1"],
+            1: ["LunarLander-v3", "Acrobot-v1", "MountainCarContinuous-v0"],
+            2: ["Hopper-v4", "Walker2d-v4", "HalfCheetah-v4"]
+        }
+        self.tier_thresholds = {
+            0: 450.0,  # CartPole success
+            1: 200.0,  # LunarLander success
+            2: 5000.0  # MuJoCo success
+        }
+
+        self.tier = 0
         self.env_metadata = {}
         self._prepopulate_metadata()
-        
+
     def _prepopulate_metadata(self):
         """Pre-fetches essential metadata for all benchmarks to assist in dispatching."""
-        import gymnasium as gym
-        for tier_envs in self.tiers.values():
-            for env_id in tier_envs:
-                try:
-                    # Create a dummy env to extract space info
-                    temp_env = gym.make(env_id)
-                    self.env_metadata[env_id] = {
-                        "is_discrete": isinstance(temp_env.action_space, gym.spaces.Discrete),
-                        "is_continuous": isinstance(temp_env.action_space, (gym.spaces.Box, gym.spaces.Dict)),
-                    }
-                    temp_env.close()
-                except:
-                    # Fallback for common ones if make fails
-                    if "CartPole" in env_id or "Acrobot" in env_id or "LunarLander-v3" == env_id:
-                        self.env_metadata[env_id] = {"is_discrete": True, "is_continuous": False}
-                    else:
-                        self.env_metadata[env_id] = {"is_discrete": False, "is_continuous": True}
-        
+        for d in self.domains:
+            tasks = d.get_tasks(tier=3) 
+            for t in tasks:
+                self.domain_map[t] = d
+                self.env_metadata[t] = d.get_metadata(t)
+
     def close(self):
         if self.executor:
             # Try to cancel pending work and shutdown
@@ -86,11 +72,12 @@ class LabEnvironment(MetaEnvironment):
 
     @property
     def allowed_envs(self) -> List[str]:
-        # Return all envs up to current tier
-        envs = []
-        for t in range(self.tier + 1):
-            envs.extend(self.tiers.get(t, []))
-        return envs
+        # Return all envs up to current tier for all domains
+        # (Simplified: Global Tier for the whole Lab for now)
+        tasks = []
+        for d in self.domains:
+            tasks.extend(d.get_tasks(self.tier))
+        return tasks
         
     def _get_env_metadata(self, env_id: str) -> Dict[str, Any]:
         """Extracts observation and action space info from gymnasium."""
@@ -208,10 +195,17 @@ class LabEnvironment(MetaEnvironment):
         
         # 1. Base Performance (0 to 1)
         env_id = result.config.env_id
-        spec = norms.get(env_id, {"min": -1000, "max": 0}) 
-        raw_reward = result.final_mean_reward
-        performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
-        result.performance_score = max(0.0, min(1.0, performance_score))
+        
+        if result.config.domain in ["coding", "vision"]:
+             # Expect 0-100 scale for final_mean_reward, normalize to 0-1
+             result.performance_score = result.final_mean_reward / 100.0
+             result.performance_score = max(0.0, min(1.0, result.performance_score))
+        else:
+            # RL Normalization
+            spec = norms.get(env_id, {"min": -1000, "max": 0}) 
+            raw_reward = result.final_mean_reward
+            performance_score = (raw_reward - spec["min"]) / (spec["max"] - spec["min"])
+            result.performance_score = max(0.0, min(1.0, performance_score))
         
         # 2. Stability Score (0 to 1)
         std_reward = result.metrics.get("std_reward", 0.0)

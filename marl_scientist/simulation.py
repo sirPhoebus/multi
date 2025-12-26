@@ -73,8 +73,10 @@ class Simulation:
             self.spawn_agent(i + 1)
             
         # We'll use Agent_1 as the "Lead Scientist" whose brain we update and then sync.
-        if "Agent_1" in self.agents:
+        if "Agent_1" in self.agents and hasattr(self.agents["Agent_1"], "brain"):
             self.trainer = MetaPPOTrainer(self.agents["Agent_1"].brain)
+        else:
+            self.trainer = None
 
     def spawn_agent(self, idx: int):
         aid = f"Agent_{idx}"
@@ -84,19 +86,30 @@ class Simulation:
         # Dependency injection will be improved in subsequent steps if needed, 
         # but let's follow the existing pattern for now within the Simulation class.
         shard = self.kb.get_shard(idx, 100)
-        agent = NeuralResearcherAgent(
-            agent_id=aid, 
-            knowledge_store=shard, 
-            trajectory_memory=self.tm, 
-            validator=self.validator
-        )
+        
+        if self.agent_type == "neural":
+            agent = NeuralResearcherAgent(
+                agent_id=aid, 
+                knowledge_store=shard, 
+                trajectory_memory=self.tm, 
+                validator=self.validator
+            )
+        else:
+            from marl_scientist.agents.researcher import ResearcherAgent
+            agent = ResearcherAgent(
+                agent_id=aid, 
+                knowledge_store=shard, 
+                trajectory_memory=self.tm
+            )
         
         profile_idx = (idx - 1) % len(self.profiles)
-        agent.preference_vec = self.profiles[profile_idx]
-        self.log.info(f"  - Profile: [yellow]{self.profile_names[profile_idx]}[/yellow] {agent.preference_vec}")
+        if hasattr(agent, "preference_vec"):
+            agent.preference_vec = self.profiles[profile_idx]
+            self.log.info(f"  - Profile: [yellow]{self.profile_names[profile_idx]}[/yellow] {agent.preference_vec}")
         
         try:
-            agent.load(f"saves/{aid}.pkl")
+            if hasattr(agent, "load"):
+                agent.load(f"saves/{aid}.pkl")
         except:
             pass
         
@@ -205,17 +218,17 @@ class Simulation:
             self.log.info(f"--- [bold yellow]Progress: {self.global_completions}/{self.steps}[/bold yellow] (Best: {self.lab.best_reward:.1f}) ---")
             
             # [PHASE 2] Trigger Update
-            if len(self.training_buffer) >= self.update_interval:
+            if self.trainer and len(self.training_buffer) >= self.update_interval:
                 self.log.info(f"[Brain] Triggering Meta-Brain Update with {len(self.training_buffer)} transitions...")
                 loss, entropy = self.trainer.update(self.training_buffer)
                 self.log.info(f"  - Meta-Loss: {loss:.44f}")
                 self.log.info(f"  - Avg Entropy: {entropy:.4f}")
                 self.training_buffer = []
                 # Sync weights to all other agents
-                if "Agent_1" in self.agents:
+                if "Agent_1" in self.agents and hasattr(self.agents["Agent_1"], "brain"):
                     lead_brain = self.agents["Agent_1"].brain
                     for other_aid, other_agent in self.agents.items():
-                        if other_aid != "Agent_1":
+                        if other_aid != "Agent_1" and hasattr(other_agent, "harvest_weights"):
                             other_agent.harvest_weights(lead_brain, tau=0.8) # Strong sync
 
             # Harvesting Trigger
@@ -242,7 +255,10 @@ class Simulation:
                      return
 
                 self.log.info(f"[Competitive] {worst_aid} is harvesting insights from {best_aid}...")
-                self.agents[worst_aid].harvest_weights(self.agents[best_aid].brain, tau=0.1)
+                best_agent = self.agents[best_aid]
+                worst_agent = self.agents[worst_aid]
+                if hasattr(best_agent, "brain") and hasattr(worst_agent, "harvest_weights"):
+                    worst_agent.harvest_weights(best_agent.brain, tau=0.1)
                 self.harvest_counts[pair_key] = count + 1
         except ValueError:
             pass
@@ -275,9 +291,23 @@ class Simulation:
         # Since this runs in a loop, we increment if we actually dispatch something or just periodically.
         # Let's count "dispatch events" roughly.
         self.diversity_counter += 1
-        is_diversity_round = (self.diversity_counter % 20 == 0) # Every ~20 ticks/dispatches
+        is_diversity_round = (self.diversity_counter % 1000 == 0) # Every ~100 seconds
         if is_diversity_round:
              self.log.info("[MultiTask] Diversity Round Active! Forcing environment mixing.")
+
+        # [NEW] Check for System Change Proposals (Every 100 ticks or when significant)
+        if self.diversity_counter % 100 == 0:
+            for aid, agent in self.agents.items():
+                prop = agent.propose_system_change()
+                if prop:
+                    # Only apply and log if it's a NEW value
+                    current_val = getattr(self, prop["target"], None)
+                    if current_val != prop["value"]:
+                        self.log.info(f"[Self-Modification] Agent {aid} proposed system change: {prop['target']} -> {prop['value']} ({prop['reason']})")
+                        # Apply change
+                        if prop["target"] == "update_interval":
+                            self.update_interval = prop["value"]
+                        # Add more targets as needed
 
         proposal_buffer = []
         for aid, agent in self.agents.items():
