@@ -45,6 +45,7 @@ class Simulation:
             3: np.array([0.4, 0.3, 0.3]), # The Balanced
         }
         self.profile_names = ["Perf-Max", "Fast-Efficient", "Stable-Reliable", "Balanced"]
+        self.meta_reward_weights = {"perf": 1.0, "efficiency": 0.05, "stability": 0.05}
 
     async def setup(self):
         self.log.info("[bold green]=== Initializing Async Meta-Scientist Ecosystem ===[/bold green]")
@@ -138,6 +139,12 @@ class Simulation:
                 # E. Periodic Vision Analysis
                 await self.periodic_vision_analysis()
                 
+                # F. [NEW] Deep Reflection Phase (Every 50 completions)
+                if self.global_completions > 0 and self.global_completions % 50 == 0:
+                     if not hasattr(self, 'last_reflection_step') or self.last_reflection_step != self.global_completions:
+                          await self.trigger_reflection_cycle()
+                          self.last_reflection_step = self.global_completions
+
                 await asyncio.sleep(0.1)
                 
         except asyncio.CancelledError:
@@ -295,19 +302,25 @@ class Simulation:
         if is_diversity_round:
              self.log.info("[MultiTask] Diversity Round Active! Forcing environment mixing.")
 
-        # [NEW] Check for System Change Proposals (Every 100 ticks or when significant)
+        # [NEW] Check for System Change Proposals (Every 100 ticks)
         if self.diversity_counter % 100 == 0:
+            obs = self.lab.get_observation()
             for aid, agent in self.agents.items():
-                prop = agent.propose_system_change()
+                if not hasattr(agent, "propose_system_change"): continue
+                
+                prop = await agent.propose_system_change(obs)
                 if prop:
-                    # Only apply and log if it's a NEW value
-                    current_val = getattr(self, prop["target"], None)
-                    if current_val != prop["value"]:
-                        self.log.info(f"[Self-Modification] Agent {aid} proposed system change: {prop['target']} -> {prop['value']} ({prop['reason']})")
-                        # Apply change
-                        if prop["target"] == "update_interval":
-                            self.update_interval = prop["value"]
-                        # Add more targets as needed
+                    target = prop["target"]
+                    val = prop["value"]
+                    # Validation: Only allow modification of known attributes
+                    if hasattr(self, target):
+                        current_val = getattr(self, target)
+                        if current_val != val:
+                            self.log.info(f"[Self-Modification] Agent {aid} proposed system change: {target} -> {val} ({prop['reason']})")
+                            setattr(self, target, val)
+                    elif target == "meta_reward_weights" and isinstance(val, dict):
+                         self.log.info(f"[Self-Modification] Agent {aid} modified Meta-Reward Weights: {val}")
+                         self.meta_reward_weights.update(val)
 
         proposal_buffer = []
         for aid, agent in self.agents.items():
@@ -465,3 +478,17 @@ class Simulation:
         for a in self.agents.values():
             a.save(f"saves/{a.agent_id}.pkl")
         self.log.info("Shutdown complete.")
+    async def trigger_reflection_cycle(self):
+        """Triggers elite agents to perform deep reflection and synthesize knowledge."""
+        self.log.info("[bold cyan]=== Simulation Entering Reflection Phase ===[/bold cyan]")
+        
+        reflection_tasks = []
+        for aid, agent in self.agents.items():
+            # Only top half of agents reflect (to save tokens and ensure quality)
+            recent_perf = self.history.get(aid, [0.0])[-1]
+            if recent_perf > np.mean([v[-1] for v in self.history.values() if v]):
+                reflection_tasks.append(agent.perform_deep_reflection())
+        
+        results = await asyncio.gather(*reflection_tasks)
+        papers_count = sum(1 for r in results if r is not None)
+        self.log.info(f"[Reflection] Phase complete. {papers_count} new Research Papers published.")

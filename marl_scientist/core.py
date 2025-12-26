@@ -51,8 +51,49 @@ class Researcher(Protocol):
     """Interface for a Researcher Agent."""
     
     def propose_experiment(self, observation: Observation) -> Union[ExperimentConfig, List[ExperimentConfig]]:
-        ...
-        
+        # Existing neural proposal logic...
+        base_config = self.neural_brain(observation)  # your RNN/LSTM output
+
+        # Trigger slow reasoning on high uncertainty or stagnation
+        if observation.novelty_landscape.get("unexplored_ratio", 0.0) > 0.7 or self.competence_low():
+            hypothesis = self._generate_hypothesis(observation)
+            configs = self._hypothesis_to_configs(hypothesis, observation)
+            return configs  # Could be multiple from one hypothesis
+
+        return base_config
+
+    def _generate_hypothesis(self, observation: Observation) -> str:
+        prompt = f"""
+            You are an RL researcher analyzing past experiments.
+
+            Recent trends: {observation.performance_trends}
+            Knowledge summary: {observation.knowledge_summary[:2000]}  # truncate for token limit
+
+            Propose a novel, testable hypothesis to improve performance.
+            Focus on hyperparameters, architecture changes, or domain transfer.
+            Output only the hypothesis as natural language.
+            """
+        return LLMClient.chat(prompt)
+
+    def _hypothesis_to_configs(self, hypothesis: str, observation: Observation) -> List[ExperimentConfig]:
+        prompt = f"""
+            Translate this hypothesis into 1-3 concrete ExperimentConfig JSON objects.
+
+            Hypothesis: {hypothesis}
+
+            Available domains: rl, coding, vision
+            Use valid JSON format with keys from ExperimentConfig.
+
+            Example:
+            [{"algorithm": "PPO", "hyperparameters": {"learning_rate": 0.0003}, "env_id": "LunarLander-v3", "domain": "rl"}]
+            """
+        response = LLMClient.chat(prompt)
+        try:
+            configs = json.loads(response)
+            return [ExperimentConfig(**c) for c in configs]
+        except:
+            # Fallback to base
+            return [self._default_config()]    
     def update_knowledge(self, result: ExperimentResult):
         ...
 

@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple, Union
 import random
 import numpy as np
 import dataclasses
@@ -55,83 +55,73 @@ class ResearcherAgent(Researcher):
     def set_validator(self, validator):
         self.validator = validator
         
-    async def propose_experiment(self, observation: Observation) -> ExperimentConfig:
+    async def propose_experiment(self, observation: Observation) -> Tuple[Union[ExperimentConfig, List[ExperimentConfig]], Dict[str, Any]]:
         """
-        Decide what to try next using a hypothesis-driven approach.
+        Decide what to try next using a hybrid approach.
         """
-        # 1. Literature Review & Context Gathering
-        context = await self._gather_context(observation)
+        # [NEW] Trigger slow reasoning on high uncertainty or stagnation
+        # User defined triggers
+        high_uncertainty = observation.novelty_landscape.get("unexplored_ratio", 0.0) > 0.7
+        stagnant = self.competence_low()
         
-        # 2. Generate Hypothesis
-        hypothesis = await self._generate_hypothesis(observation, context)
-        self.log.info(f"[Agent {self.agent_id}] Hypothesis: {hypothesis}")
-        
-        # 3. Translate Hypothesis to Experiment
-        proposal = await self._translate_hypothesis_to_experiment(hypothesis, observation)
-        
-        if not proposal:
-             # Fallback to mutation if translation fails
-             return self._mutate_config(self.current_best_config, observation)
+        if high_uncertainty or stagnant:
+            self.log.info(f"[Agent {self.agent_id}] Slow Reasoning Triggered: Uncertainty={high_uncertainty}, Stagnation={stagnant}")
+            # 1. Literature Review & Context Gathering
+            context = await self._gather_context(observation)
+            
+            # 2. Generate Hypothesis
+            hypothesis = await self._generate_hypothesis(observation, context)
+            self.log.info(f"[Agent {self.agent_id}] Hypothesis: {hypothesis}")
+            
+            # 3. Translate Hypothesis to Experiment(s)
+            proposal = await self._translate_hypothesis_to_experiment(hypothesis, observation)
+            if proposal:
+                 return proposal, {}
 
-        # [NEW] Log Observation Features for debugging/verification
-        if observation and observation.performance_trends:
-             pt = observation.performance_trends
-             nl = observation.novelty_landscape
-             # print(f"[Agent {self.agent_id}] Obs: Trend={pt.get('improvement_rate',0):.2f}, Stability={pt.get('stability',0):.2f}, Explored={nl.get('explored_ratio',0):.2f}")
-
-        # 2. Social Learning: Check if anyone else (immediate peers in this batch) found something amazing
-        best_peer_config = self._check_peer_results(observation)
-        if best_peer_config:
-             # Adopt peer's strategy as new baseline if it's much better
-             # (In a real system, we'd verify it first)
-             self.current_best_config = best_peer_config
-             
-        # [NEW] Meta-Strategy for Domain Selection
-        # Use Epsilon-Greedy or Softmax on self.competence to pick 'target_domain'
-        target_domain = self._select_target_domain()
-        
-        # Filter available envs by target_domain
-        available_envs = []
-        if observation and observation.env_metadata:
-            for eid, meta in observation.env_metadata.items():
-                if meta.get("domain", "rl") == target_domain:
-                    available_envs.append(eid)
-        
-        # If no envs for target domain, fallback to all
-        if not available_envs:
-             available_envs = list(observation.env_metadata.keys()) if (observation and observation.env_metadata) else ["CartPole-v1"]
-
-        # Pick random env for now (we could pick best known for that domain if we tracked it)
-        env_id = random.choice(available_envs)
-        
-        if proposal:
-             # Ensure the proposal uses an env from the target domain if possible
-             if proposal.env_id not in available_envs and available_envs:
-                 proposal.env_id = random.choice(available_envs)
-             
-             # If it's coding, we still favor the dedicated generator for now, 
-             # but we could merge them.
-             if target_domain == "coding":
-                  return self._generate_code_solution(proposal.env_id, observation), {}
-                  
-             return proposal, {}
-
+        # Fallback to standard mutation/random
         return self._mutate_config(self.current_best_config, observation), {}
 
+    def competence_low(self) -> bool:
+        """Check if overall competence is low across domains."""
+        avg_comp = sum(self.competence.values()) / len(self.competence) if self.competence else 0.0
+        return avg_comp < 0.2
+
     async def _gather_context(self, observation: Observation) -> str:
-        """Gathers literature and peer results into a context string."""
-        context = "Recent peer results:\n"
-        best_peer = self._check_peer_results(observation)
-        if best_peer:
-            context += f"- Peer found success with {best_peer.algorithm} on {best_peer.env_id}\n"
+        """[PILLAR 1] Gathers literature and peer results into a context string."""
+        context = "Recent peer results from Shared Journal:\n"
+        if self.knowledge_store:
+            # Query journal for insights related to current best algorithm
+            query = f"Optimizing {self.current_best_config.algorithm} performance"
+            journal_hits = await self.knowledge_store.search(query, k=3)
+            if journal_hits:
+                for h in journal_hits:
+                    context += f"- {h['metadata'].get('title', 'Insight')}: {h['text']}\n"
         
         lit_hits = await self._review_literature_hits()
         if lit_hits:
-            context += "\nRelevant literature:\n"
+            context += "\nRelevant literature from Knowledge Store:\n"
             for h in lit_hits:
                 context += f"- {h['metadata']['title']}: {h['text'][:200]}...\n"
         
         return context
+
+    def _check_peer_results(self, observation: Observation) -> Optional[ExperimentConfig]:
+        """Checks the immediate observation for any peer who outperformed us in this session."""
+        if not observation or not observation.metrics:
+            return None
+        
+        best_reward = self.best_performance
+        best_cfg = None
+        
+        for aid, metrics in observation.metrics.items():
+            if aid == self.agent_id: continue
+            reward = metrics.get("mean_reward", -float('inf'))
+            if reward > best_reward:
+                best_reward = reward
+                # We assume the config is available in observation or we just know 
+                # (In this simulation, we can peek if we want to simulate social learning)
+                # But it's cleaner to use the KnowledgeStore as the source of truth.
+        return best_cfg
 
     async def _generate_hypothesis(self, observation: Observation, context: str) -> str:
         """Uses LLM to generate a natural language hypothesis."""
@@ -191,16 +181,34 @@ Rules for code generation:
         except:
              return None
 
-    def propose_system_change(self) -> Optional[Dict]:
-        """[SELf-MODIFICATION] Propose a change to the simulation parameters."""
+    async def propose_system_change(self, observation: Observation) -> Optional[Dict]:
+        """[SELf-MODIFICATION] Propose a change to the simulation parameters using LLM."""
         if self.best_performance < 400: # Only elites propose changes
             return None
             
-        return {
-            "target": "update_interval",
-            "value": 20,
-            "reason": "Stable performance allows for larger update batches."
-        }
+        prompt = f"""
+            You are an Elite RL Lead Researcher. Your current best performance is {self.best_performance:.1f}.
+            The simulation is running with:
+            - update_interval (batch size)
+            - meta_reward_weights (Perf, Efficiency, Stability)
+            - population_cap
+            
+            Current Observation: {observation.performance_trends}
+            
+            Propose a single system-level modification to improve the collective swarm intelligence.
+            Output JSON only:
+            {{
+                "target": "name_of_parameter",
+                "value": new_value,
+                "reason": "short_explanation"
+            }}
+        """
+        try:
+            response = await self.llm.async_chat_completion([{"role": "user", "content": prompt}])
+            clean_json = re.search(r"\{.*\}", response, re.DOTALL).group(0)
+            return json.loads(clean_json)
+        except:
+            return None
             
     async def update_knowledge(self, result: ExperimentResult):
         """
@@ -228,14 +236,19 @@ Rules for code generation:
         if self.trajectory_memory:
             await self.trajectory_memory.add(result)
         
+        # [NEW] Deep Reflection (Research Papers)
+        if not hasattr(self, 'recent_results'):
+            self.recent_results = []
+        self.recent_results.append(result)
+        # Keep recent 20 for reflection
+        if len(self.recent_results) > 20: self.recent_results.pop(0)
+
         # Update Best Known
         if result.final_mean_reward > self.best_performance:
             self.best_performance = result.final_mean_reward
             self.current_best_config = result.config
             
             # Publish if it's a significant finding
-            # Logic: If it's better than anything we've found before, OR it's a high score.
-            # We remove the hardcoded 300.0 CartPole bias.
             if self.knowledge_store:
                 paper = self.knowledge_store.synthesize_new_paper(result, self.agent_id)
                 await self.knowledge_store.add_paper(paper)
@@ -244,13 +257,52 @@ Rules for code generation:
                 insight = f"Agent {self.agent_id} optimized {result.config.algorithm} on {result.config.env_id} achieving {result.final_mean_reward:.1f}. Key params: {result.config.hyperparameters}"
                 await self.knowledge_store.add_insight(insight, self.agent_id)
 
+    async def perform_deep_reflection(self) -> Optional[str]:
+        """Synthesizes recent trajectories into a structured Research Paper."""
+        if not self.recent_results or not self.knowledge_store:
+            return None
+            
+        self.log.info(f"[{self.agent_id}] Starting Deep Reflection Phase...")
+        
+        # Sample recent hits for summary
+        summaries = [f"Env: {r.config.env_id}, Reward: {r.final_mean_reward:.1f}" for r in self.recent_results[-5:]]
+        
+        prompt = f"""
+            You are a Senior AI Scientist. Reflect on your last series of experiments:
+            {summaries}
+            
+            Write a formal, structured Research Paper in Markdown summarizing:
+            - Goal: The objective of this research batch.
+            - Observations: Patterns in hyperparameter sensitivity.
+            - Meta-Insight: A high-level conclusion for the shared knowledge base.
+            - Next Steps: Recommendations for future experiments.
+            
+            Keep it concise but impactful (300-500 words).
+        """
+        try:
+            paper_content = await self.llm.async_chat_completion([{"role": "user", "content": prompt}])
+            
+            # Index as a paper in the knowledge store
+            paper_obj = {
+                "text": paper_content,
+                "metadata": {
+                    "title": f"Synthesis of Research Batch: Agent {self.agent_id}",
+                    "author": self.agent_id,
+                    "type": "reflection_paper"
+                }
+            }
+            await self.knowledge_store.add_paper(paper_obj)
+            self.recent_results = [] # Reset after reflection
+            return paper_content
+        except Exception as e:
+            self.log.error(f"Reflection failed: {e}")
+            return None
+
     async def _review_literature_hits(self) -> List[Dict]:
         """Internal helper for context gathering."""
         if not self.knowledge_store: return []
-        query = f"Optimizing {self.current_best_config.algorithm} performance"
+        query = f"Advanced strategies for {self.current_best_config.algorithm}"
         return await self.knowledge_store.search(query, k=3)
-
-    async def _review_literature(self) -> Optional[ExperimentConfig]:
         """
         Consults the agent's shard of the Knowledge Base.
         """

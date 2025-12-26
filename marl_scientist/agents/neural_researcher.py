@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import time
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, List, Optional, Tuple, Union
 from marl_scientist.core import Researcher, Observation, ExperimentConfig, ExperimentResult
 from marl_scientist.agents.brain import MetaBrain, BrainEncoder
 from marl_scientist.agents.memory import EpisodicMemory, TrajectoryMemory
@@ -290,15 +290,6 @@ class NeuralResearcherAgent(ResearcherAgent):
 
         return config, train_data
 
-    def propose_system_change(self) -> Optional[Dict]:
-        """Supports the new self-modification mechanism."""
-        if self.best_performance < 400:
-            return None
-        return {
-            "target": "update_interval",
-            "value": 20,
-            "reason": "Neural convergence suggests higher batch size."
-        }
 
     async def update_knowledge(self, result: ExperimentResult):
         """Neural agent learns via meta-loop and hypothesis-driven insights."""
